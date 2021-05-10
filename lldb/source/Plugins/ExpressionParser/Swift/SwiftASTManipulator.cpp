@@ -186,8 +186,9 @@ do {
         func_decorator = "final class";
       else
         func_decorator = "static";
-    } else if (is_class && !weak_self) {
-      func_decorator = "final";
+    } else if (is_class) {
+      if (!weak_self)
+        func_decorator = "final";
     } else {
       func_decorator = "mutating";
     }
