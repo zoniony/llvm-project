@@ -52,9 +52,11 @@ int main(int Argc, char **Argv) {
   InitLLVM X(Argc, Argv);
 
   cl::list<std::string> Objects(cl::Positional, cl::desc("<object>..."));
-  cl::opt<std::string> CASPath("cas", cl::desc("Path to CAS on disk."));
+  cl::opt<std::string> CASPath("cas", cl::desc("Path to CAS on disk."),
+                               cl::value_desc("path"));
   cl::opt<std::string> DataPath("data",
-                                cl::desc("Path to data or '-' for stdin."));
+                                cl::desc("Path to data or '-' for stdin."),
+                                cl::value_desc("path"));
 
   enum CommandKind {
     Invalid,
@@ -100,9 +102,16 @@ int main(int Argc, char **Argv) {
     ExitOnErr(createStringError(inconvertibleErrorCode(),
                                 "no command action is specified"));
 
+  // FIXME: Consider creating an in-memory CAS.
   if (CASPath.empty())
-    ExitOnErr(createStringError(inconvertibleErrorCode(), "missing --path"));
-  std::unique_ptr<CASDB> CAS = ExitOnErr(llvm::cas::createOnDiskCAS(CASPath));
+    ExitOnErr(
+        createStringError(inconvertibleErrorCode(), "missing --cas=<path>"));
+  std::unique_ptr<CASDB> CAS;
+  if (CASPath == "auto")
+    CAS = ExitOnErr(
+        llvm::cas::createOnDiskCAS(llvm::cas::getDefaultOnDiskCASPath()));
+  else
+    CAS = ExitOnErr(llvm::cas::createOnDiskCAS(CASPath));
   assert(CAS);
 
   if (Command == Dump)
@@ -121,8 +130,8 @@ int main(int Argc, char **Argv) {
       CommandErr(
           createStringError(inconvertibleErrorCode(), "expected 2 objects"));
 
-    CASID LHS = ExitOnErr(CAS->parseCASID(Objects[0]));
-    CASID RHS = ExitOnErr(CAS->parseCASID(Objects[1]));
+    CASID LHS = ExitOnErr(CAS->parseID(Objects[0]));
+    CASID RHS = ExitOnErr(CAS->parseID(Objects[1]));
     return diffGraphs(*CAS, LHS, RHS);
   }
 
@@ -139,7 +148,7 @@ int main(int Argc, char **Argv) {
   if (Objects.size() > 1)
     ExitOnErr(createStringError(inconvertibleErrorCode(),
                                 "too many <object>s, expected 1"));
-  CASID ID = ExitOnErr(CAS->parseCASID(Objects.front()));
+  CASID ID = ExitOnErr(CAS->parseID(Objects.front()));
 
   if (Command == TraverseGraph)
     return traverseGraph(*CAS, ID);
@@ -186,9 +195,7 @@ void printTreeEntryKind(raw_ostream &OS, TreeEntry::EntryKind Kind) {
 void printTreeEntry(CASDB &CAS, raw_ostream &OS, TreeEntry::EntryKind Kind,
                     CASID ID, StringRef Name) {
   printTreeEntryKind(OS, Kind);
-  OS << " ";
-  cantFail(CAS.printCASID(OS, ID));
-  OS << " " << Name;
+  OS << " " << ID << " " << Name;
   if (Kind == TreeEntry::Tree)
     OS << "/";
   if (Kind == TreeEntry::Symlink) {
@@ -209,7 +216,7 @@ void printTreeEntry(CASDB &CAS, raw_ostream &OS, const NamedTreeEntry &Entry) {
 int listTree(CASDB &CAS, CASID ID) {
   ExitOnError ExitOnErr("llvm-cas: ls-tree: ");
 
-  TreeRef Tree = ExitOnErr(CAS.getTree(ID));
+  TreeProxy Tree = ExitOnErr(CAS.getTree(ID));
   ExitOnErr(Tree.forEachEntry([&](const NamedTreeEntry &Entry) {
     printTreeEntry(CAS, llvm::outs(), Entry);
     return Error::success();
@@ -222,7 +229,7 @@ int listTreeRecursively(CASDB &CAS, CASID ID) {
   ExitOnError ExitOnErr("llvm-cas: ls-tree-recursively: ");
   ExitOnErr(walkFileTreeRecursively(
       CAS, ID,
-      [&](const NamedTreeEntry &Entry, Optional<TreeRef> Tree) -> Error {
+      [&](const NamedTreeEntry &Entry, Optional<TreeProxy> Tree) -> Error {
         if (Entry.getKind() != TreeEntry::Tree) {
           printTreeEntry(CAS, llvm::outs(), Entry);
           return Error::success();
@@ -261,9 +268,8 @@ int makeBlob(CASDB &CAS, StringRef DataPath) {
   std::unique_ptr<MemoryBuffer> Buffer =
       ExitOnErr(openBuffer(DataPath));
 
-  BlobRef Blob = ExitOnErr(CAS.createBlob(Buffer->getBuffer()));
-  ExitOnErr(CAS.printCASID(llvm::outs(), Blob));
-  llvm::outs() << "\n";
+  BlobProxy Blob = ExitOnErr(CAS.createBlob(Buffer->getBuffer()));
+  llvm::outs() << Blob.getID() << "\n";
   return 0;
 }
 
@@ -273,35 +279,31 @@ int catNodeData(CASDB &CAS, CASID ID) {
   return 0;
 }
 
+static StringRef getKindString(AnyObjectHandle Object) {
+  if (Object.is<BlobHandle>())
+    return "blob";
+  if (Object.is<TreeHandle>())
+    return "tree";
+  assert(Object.is<NodeHandle>());
+  return "node";
+}
+
 int printKind(CASDB &CAS, CASID ID) {
   ExitOnError ExitOnErr("llvm-cas: print-kind: ");
-  Optional<ObjectKind> Kind = CAS.getObjectKind(ID);
-  if (!Kind)
+  Optional<AnyObjectHandle> Object = ExitOnErr(CAS.loadObject(ID));
+  if (!Object)
     ExitOnErr(createStringError(inconvertibleErrorCode(), "unknown object"));
 
-  switch (*Kind) {
-  case ObjectKind::Blob:
-    llvm::outs() << "blob\n";
-    break;
-  case ObjectKind::Tree:
-    llvm::outs() << "tree\n";
-    break;
-  case ObjectKind::Node:
-    llvm::outs() << "node";
-    break;
-  }
-
+  llvm::outs() << getKindString(*Object) << "\n";
   return 0;
 }
 
 int listObjectReferences(CASDB &CAS, CASID ID) {
   ExitOnError ExitOnErr("llvm-cas: ls-node-refs: ");
 
-  NodeRef Object = ExitOnErr(CAS.getNode(ID));
-  ExitOnErr(Object.forEachReference([&](CASID ID) -> Error {
-    if (Error E = CAS.printCASID(llvm::outs(), ID))
-      return E;
-    llvm::outs() << "\n";
+  NodeProxy Object = ExitOnErr(CAS.getNode(ID));
+  ExitOnErr(Object.forEachReferenceID([&](CASID ID) -> Error {
+    llvm::outs() << ID << "\n";
     return Error::success();
   }));
 
@@ -315,17 +317,16 @@ static int makeNode(CASDB &CAS, ArrayRef<std::string> Objects, StringRef DataPat
   SmallVector<CASID> IDs;
   for (StringRef Object : Objects) {
     ExitOnError ObjectErr("llvm-cas: make-node: ref: ");
-    CASID ID = ObjectErr(CAS.parseCASID(Object));
-    if (!CAS.isKnownObject(ID))
+    CASID ID = ObjectErr(CAS.parseID(Object));
+    if (!CAS.getReference(ID))
       ObjectErr(createStringError(inconvertibleErrorCode(),
                                   "unknown object '" + Object + "'"));
     IDs.push_back(ID);
   }
 
   ExitOnError ExitOnErr("llvm-cas: make-node: ");
-  NodeRef Object = ExitOnErr(CAS.createNode(IDs, Data->getBuffer()));
-  ExitOnErr(CAS.printCASID(llvm::outs(), Object));
-  llvm::outs() << "\n";
+  NodeProxy Object = ExitOnErr(CAS.createNode(IDs, Data->getBuffer()));
+  llvm::outs() << Object.getID() << "\n";
   return 0;
 }
 
@@ -353,25 +354,21 @@ static GraphInfo traverseObjectGraph(CASDB &CAS, CASID TopLevel) {
     }
     Worklist.back().second = true;
     CASID ID = Worklist.back().first;
-    Optional<ObjectKind> Kind = CAS.getObjectKind(ID);
-    assert(Kind);
-
-    if (*Kind == ObjectKind::Blob)
+    Optional<AnyObjectHandle> Object = ExitOnErr(CAS.loadObject(ID));
+    if (!Object || Object->is<BlobHandle>())
       continue;
 
-    if (*Kind == ObjectKind::Tree) {
-      TreeRef Tree = ExitOnErr(CAS.getTree(ID));
-      ExitOnErr(Tree.forEachEntry([&](const NamedTreeEntry &Entry) {
+    if (auto Tree = Object->dyn_cast<TreeHandle>()) {
+      ExitOnErr(CAS.forEachTreeEntry(*Tree, [&](const NamedTreeEntry &Entry) {
         push(Entry.getID());
         return Error::success();
       }));
       continue;
     }
 
-    assert(*Kind == ObjectKind::Node);
-    NodeRef Object = ExitOnErr(CAS.getNode(ID));
-    ExitOnErr(Object.forEachReference([&](CASID ID) {
-      push(ID);
+    auto Node = Object->get<NodeHandle>();
+    ExitOnErr(CAS.forEachRef(Node, [&](ObjectRef Ref) {
+      push(CAS.getObjectID(Ref));
       return Error::success();
     }));
   }
@@ -383,31 +380,15 @@ static void printDiffs(CASDB &CAS, const GraphInfo &Baseline,
                        const GraphInfo &New, StringRef NewName) {
   ExitOnError ExitOnErr("llvm-cas: diff-graphs: ");
 
-  SmallString<128> PrintedID;
   for (cas::CASID ID : New.PostOrder) {
     if (Baseline.Seen.count(ID))
       continue;
 
-    PrintedID.clear();
-    raw_svector_ostream OS(PrintedID);
-    ExitOnErr(CAS.printCASID(OS, ID));
-
     StringRef KindString;
-    if (Optional<ObjectKind> Kind = CAS.getObjectKind(ID)) {
-      switch (*Kind) {
-      case ObjectKind::Blob:
-        KindString = "blob";
-        break;
-      case ObjectKind::Tree:
-        KindString = "tree";
-        break;
-      default:
-        KindString = "node";
-        break;
-      }
-    }
+    if (Optional<AnyObjectHandle> Object = ExitOnErr(CAS.loadObject(ID)))
+      KindString = getKindString(*Object);
 
-    outs() << llvm::formatv("{0}{1,-4} {2}\n", NewName, KindString, PrintedID);
+    outs() << llvm::formatv("{0}{1,-4} {2}\n", NewName, KindString, ID);
   }
 }
 
@@ -434,7 +415,7 @@ int traverseGraph(CASDB &CAS, CASID ID) {
 static Error recursiveAccess(CachingOnDiskFileSystem &FS, StringRef Path) {
   auto ST = FS.status(Path);
   if (!ST)
-    return errorCodeToError(ST.getError());
+    return createFileError(Path, ST.getError());
 
   if (ST->isDirectory()) {
     std::error_code EC;
@@ -449,7 +430,7 @@ static Error recursiveAccess(CachingOnDiskFileSystem &FS, StringRef Path) {
   return Error::success();
 }
 
-static Expected<TreeRef> ingestFileSystemImpl(CASDB &CAS, StringRef Path) {
+static Expected<TreeProxy> ingestFileSystemImpl(CASDB &CAS, StringRef Path) {
   auto FS = createCachingOnDiskFileSystem(CAS);
   if (!FS)
     return FS.takeError();
@@ -477,8 +458,11 @@ static Expected<TreeRef> ingestFileSystemImpl(CASDB &CAS, StringRef Path) {
 
 int ingestFileSystem(CASDB &CAS, StringRef Path) {
   ExitOnError ExitOnErr("llvm-cas: ingest: ");
+  if (Path.empty())
+    ExitOnErr(
+        createStringError(inconvertibleErrorCode(), "missing --data=<path>"));
   auto Ref = ExitOnErr(ingestFileSystemImpl(CAS, Path));
-  ExitOnErr(CAS.printCASID(outs(), Ref));
+  outs() << Ref.getID() << "\n";
   return 0;
 }
 
@@ -487,7 +471,7 @@ static int mergeTrees(CASDB &CAS, ArrayRef<std::string> Objects) {
 
   HierarchicalTreeBuilder Builder;
   for (const auto &Object : Objects) {
-    auto ID = CAS.parseCASID(Object);
+    auto ID = CAS.parseID(Object);
     if (ID) {
       Builder.pushTreeContent(*ID, "");
     } else {
@@ -498,7 +482,7 @@ static int mergeTrees(CASDB &CAS, ArrayRef<std::string> Objects) {
   }
 
   auto Ref = ExitOnErr(Builder.create(CAS));
-  ExitOnErr(CAS.printCASID(outs(), Ref));
+  outs() << Ref.getID() << "\n";
   return 0;
 }
 
@@ -513,6 +497,6 @@ int getCASIDForFile(CASDB &CAS, CASID ID, StringRef Path) {
     ExitOnErr(errorCodeToError(
         std::make_error_code(std::errc::no_such_file_or_directory)));
 
-  ExitOnErr(CAS.printCASID(outs(), *FileID));
+  outs() << *FileID << "\n";
   return 0;
 }

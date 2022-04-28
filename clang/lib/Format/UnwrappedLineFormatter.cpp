@@ -26,6 +26,11 @@ bool startsExternCBlock(const AnnotatedLine &Line) {
          NextNext && NextNext->is(tok::l_brace);
 }
 
+bool isRecordLBrace(const FormatToken &Tok) {
+  return Tok.isOneOf(TT_ClassLBrace, TT_EnumLBrace, TT_RecordLBrace,
+                     TT_StructLBrace, TT_UnionLBrace);
+}
+
 /// Tracks the indent level of \c AnnotatedLines across levels.
 ///
 /// \c nextLine must be called for each \c AnnotatedLine, after which \c
@@ -301,16 +306,29 @@ private:
 
           // TODO: Use IndentTracker to avoid loop?
           // Find the last line with lower level.
-          auto J = I - 1;
-          for (; J != AnnotatedLines.begin(); --J)
-            if ((*J)->Level < TheLine->Level)
+          const AnnotatedLine *Line = nullptr;
+          for (auto J = I - 1; J >= AnnotatedLines.begin(); --J) {
+            assert(*J);
+            if (!(*J)->InPPDirective && !(*J)->isComment() &&
+                (*J)->Level < TheLine->Level) {
+              Line = *J;
               break;
+            }
+          }
+
+          if (!Line)
+            return false;
 
           // Check if the found line starts a record.
-          for (const FormatToken *RecordTok = (*J)->Last; RecordTok;
-               RecordTok = RecordTok->Previous)
-            if (RecordTok->is(tok::l_brace))
-              return RecordTok->is(TT_RecordLBrace);
+          const FormatToken *LastNonComment = Line->Last;
+          assert(LastNonComment);
+          if (LastNonComment->is(tok::comment)) {
+            LastNonComment = LastNonComment->getPreviousNonComment();
+            // There must be another token (usually `{`), because we chose a
+            // non-PPDirective and non-comment line that has a smaller level.
+            assert(LastNonComment);
+          }
+          return isRecordLBrace(*LastNonComment);
         }
       }
 
@@ -457,27 +475,31 @@ private:
       }
     }
 
-    // Try to merge a block with left brace unwrapped that wasn't yet covered.
     if (TheLine->Last->is(tok::l_brace)) {
-      const FormatToken *Tok = TheLine->First;
       bool ShouldMerge = false;
-      if (Tok->is(tok::kw_typedef)) {
-        Tok = Tok->getNextNonComment();
-        assert(Tok);
-      }
-      if (Tok->isOneOf(tok::kw_class, tok::kw_struct)) {
+      // Try to merge records.
+      if (TheLine->Last->is(TT_EnumLBrace)) {
+        ShouldMerge = Style.AllowShortEnumsOnASingleLine;
+      } else if (TheLine->Last->isOneOf(TT_ClassLBrace, TT_StructLBrace)) {
+        // NOTE: We use AfterClass (whereas AfterStruct exists) for both classes
+        // and structs, but it seems that wrapping is still handled correctly
+        // elsewhere.
         ShouldMerge = !Style.BraceWrapping.AfterClass ||
                       (NextLine.First->is(tok::r_brace) &&
                        !Style.BraceWrapping.SplitEmptyRecord);
-      } else if (Tok->is(tok::kw_enum)) {
-        ShouldMerge = Style.AllowShortEnumsOnASingleLine;
       } else {
+        // Try to merge a block with left brace unwrapped that wasn't yet
+        // covered.
+        assert(TheLine->InPPDirective ||
+               !TheLine->First->isOneOf(tok::kw_class, tok::kw_enum,
+                                        tok::kw_struct));
         ShouldMerge = !Style.BraceWrapping.AfterFunction ||
                       (NextLine.First->is(tok::r_brace) &&
                        !Style.BraceWrapping.SplitEmptyFunction);
       }
       return ShouldMerge ? tryMergeSimpleBlock(I, E, Limit) : 0;
     }
+
     // Try to merge a function block with left brace wrapped.
     if (NextLine.First->is(TT_FunctionLBrace) &&
         Style.BraceWrapping.AfterFunction) {
@@ -715,6 +737,7 @@ private:
         const FormatToken *Next = Tok->getNextNonComment();
         return !Next || Next->is(tok::semi);
       };
+
       if (ShouldMerge()) {
         // We merge empty blocks even if the line exceeds the column limit.
         Tok->SpacesRequiredBefore = Style.SpaceInEmptyBlock ? 1 : 0;
@@ -723,18 +746,7 @@ private:
       } else if (Limit != 0 && !Line.startsWithNamespace() &&
                  !startsExternCBlock(Line)) {
         // We don't merge short records.
-        FormatToken *RecordTok = Line.First;
-        // Skip record modifiers.
-        while (RecordTok->Next &&
-               RecordTok->isOneOf(tok::kw_typedef, tok::kw_export,
-                                  Keywords.kw_declare, Keywords.kw_abstract,
-                                  tok::kw_default, Keywords.kw_override,
-                                  tok::kw_public, tok::kw_private,
-                                  tok::kw_protected, Keywords.kw_internal))
-          RecordTok = RecordTok->Next;
-        if (RecordTok &&
-            RecordTok->isOneOf(tok::kw_class, tok::kw_union, tok::kw_struct,
-                               Keywords.kw_interface))
+        if (isRecordLBrace(*Line.Last))
           return 0;
 
         // Check that we still have three lines and they fit into the limit.
@@ -1425,8 +1437,10 @@ void UnwrappedLineFormatter::formatFirstToken(
   if (Newlines)
     Indent = NewlineIndent;
 
-  // Preprocessor directives get indented before the hash only if specified
-  if (Style.IndentPPDirectives != FormatStyle::PPDIS_BeforeHash &&
+  // Preprocessor directives get indented before the hash only if specified. In
+  // Javascript import statements are indented like normal statements.
+  if (!Style.isJavaScript() &&
+      Style.IndentPPDirectives != FormatStyle::PPDIS_BeforeHash &&
       (Line.Type == LT_PreprocessorDirective ||
        Line.Type == LT_ImportStatement))
     Indent = 0;

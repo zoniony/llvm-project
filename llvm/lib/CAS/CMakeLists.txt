@@ -2,13 +2,16 @@ add_llvm_component_library(LLVMCAS
   BuiltinCAS.cpp
   CASDB.cpp
   CASFileSystem.cpp
+  CASNodeSchema.cpp
   CASOutputBackend.cpp
   CachingOnDiskFileSystem.cpp
   FileSystemCache.cpp
   HashMappedTrie.cpp
   HierarchicalTreeBuilder.cpp
+  InMemoryCAS.cpp
   LazyMappedFileRegion.cpp
   LazyMappedFileRegionBumpPtr.cpp
+  OnDiskCAS.cpp
   OnDiskHashMappedTrie.cpp
   PluginCAS.cpp
   Utils.cpp

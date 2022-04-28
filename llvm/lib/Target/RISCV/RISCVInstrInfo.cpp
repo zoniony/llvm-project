@@ -998,8 +998,6 @@ bool RISCVInstrInfo::isAsCheapAsAMove(const MachineInstr &MI) const {
     return (MI.getOperand(1).isReg() &&
             MI.getOperand(1).getReg() == RISCV::X0) ||
            (MI.getOperand(2).isImm() && MI.getOperand(2).getImm() == 0);
-  case RISCV::LUI:
-    return MI.getOperand(1).getTargetFlags() != RISCVII::MO_HI;
   }
   return MI.isAsCheapAsAMove();
 }
@@ -1205,10 +1203,7 @@ outliner::OutlinedFunction RISCVInstrInfo::getOutliningCandidateInfo(
   // be used to setup the function call.
   auto CannotInsertCall = [](outliner::Candidate &C) {
     const TargetRegisterInfo *TRI = C.getMF()->getSubtarget().getRegisterInfo();
-
-    C.initLRU(*TRI);
-    LiveRegUnits LRU = C.LRU;
-    return !LRU.available(RISCV::X5);
+    return !C.isAvailableAcrossAndOutOfSeq(RISCV::X5, *TRI);
   };
 
   llvm::erase_if(RepeatedSequenceLocs, CannotInsertCall);
@@ -1251,7 +1246,12 @@ RISCVInstrInfo::getOutliningType(MachineBasicBlock::iterator &MBBI,
   if (MI.isPosition()) {
     // We can manually strip out CFI instructions later.
     if (MI.isCFIInstruction())
-      return outliner::InstrType::Invisible;
+      // If current function has exception handling code, we can't outline &
+      // strip these CFI instructions since it may break .eh_frame section
+      // needed in unwinding.
+      return MI.getMF()->getFunction().needsUnwindTableEntry()
+                 ? outliner::InstrType::Illegal
+                 : outliner::InstrType::Invisible;
 
     return outliner::InstrType::Illegal;
   }
@@ -1318,7 +1318,7 @@ void RISCVInstrInfo::buildOutlinedFrame(
 
 MachineBasicBlock::iterator RISCVInstrInfo::insertOutlinedCall(
     Module &M, MachineBasicBlock &MBB, MachineBasicBlock::iterator &It,
-    MachineFunction &MF, const outliner::Candidate &C) const {
+    MachineFunction &MF, outliner::Candidate &C) const {
 
   // Add in a call instruction to the outlined function at the given location.
   It = MBB.insert(It,
@@ -1326,6 +1326,53 @@ MachineBasicBlock::iterator RISCVInstrInfo::insertOutlinedCall(
                       .addGlobalAddress(M.getNamedValue(MF.getName()), 0,
                                         RISCVII::MO_CALL));
   return It;
+}
+
+// MIR printer helper function to annotate Operands with a comment.
+std::string RISCVInstrInfo::createMIROperandComment(
+    const MachineInstr &MI, const MachineOperand &Op, unsigned OpIdx,
+    const TargetRegisterInfo *TRI) const {
+  // Print a generic comment for this operand if there is one.
+  std::string GenericComment =
+      TargetInstrInfo::createMIROperandComment(MI, Op, OpIdx, TRI);
+  if (!GenericComment.empty())
+    return GenericComment;
+
+  // If not, we must have an immediate operand.
+  if (Op.getType() != MachineOperand::MO_Immediate)
+    return std::string();
+
+  std::string Comment;
+  raw_string_ostream OS(Comment);
+
+  uint64_t TSFlags = MI.getDesc().TSFlags;
+
+  // Print the full VType operand of vsetvli/vsetivli instructions, and the SEW
+  // operand of vector codegen pseudos.
+  if ((MI.getOpcode() == RISCV::VSETVLI || MI.getOpcode() == RISCV::VSETIVLI ||
+       MI.getOpcode() == RISCV::PseudoVSETVLI ||
+       MI.getOpcode() == RISCV::PseudoVSETIVLI ||
+       MI.getOpcode() == RISCV::PseudoVSETVLIX0) &&
+      OpIdx == 2) {
+    unsigned Imm = MI.getOperand(OpIdx).getImm();
+    RISCVVType::printVType(Imm, OS);
+  } else if (RISCVII::hasSEWOp(TSFlags)) {
+    unsigned NumOperands = MI.getNumExplicitOperands();
+    bool HasPolicy = RISCVII::hasVecPolicyOp(TSFlags);
+
+    // The SEW operand is before any policy operand.
+    if (OpIdx != NumOperands - HasPolicy - 1)
+      return std::string();
+
+    unsigned Log2SEW = MI.getOperand(OpIdx).getImm();
+    unsigned SEW = Log2SEW ? 1 << Log2SEW : 8;
+    assert(RISCVVType::isValidSEW(SEW) && "Unexpected SEW");
+
+    OS << "e" << SEW;
+  }
+
+  OS.flush();
+  return Comment;
 }
 
 // clang-format off

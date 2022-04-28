@@ -7,6 +7,7 @@
 string(TOUPPER "${CMAKE_BUILD_TYPE}" uppercase_CMAKE_BUILD_TYPE)
 
 include(CheckCompilerVersion)
+include(CheckProblematicConfigurations)
 include(HandleLLVMStdlib)
 include(CheckCCompilerFlag)
 include(CheckCXXCompilerFlag)
@@ -974,16 +975,6 @@ if(LLVM_ENABLE_EH AND NOT LLVM_ENABLE_RTTI)
   message(FATAL_ERROR "Exception handling requires RTTI. You must set LLVM_ENABLE_RTTI to ON")
 endif()
 
-option(LLVM_USE_NEWPM "Build LLVM using the experimental new pass manager" Off)
-mark_as_advanced(LLVM_USE_NEWPM)
-if (LLVM_USE_NEWPM)
-  append("-fexperimental-new-pass-manager"
-    CMAKE_CXX_FLAGS
-    CMAKE_C_FLAGS
-    CMAKE_EXE_LINKER_FLAGS
-    CMAKE_SHARED_LINKER_FLAGS)
-endif()
-
 option(LLVM_ENABLE_IR_PGO "Build LLVM and tools with IR PGO instrumentation (deprecated)" Off)
 mark_as_advanced(LLVM_ENABLE_IR_PGO)
 
@@ -1082,6 +1073,8 @@ if (LLVM_BUILD_INSTRUMENTED AND LLVM_BUILD_INSTRUMENTED_COVERAGE)
   message(FATAL_ERROR "LLVM_BUILD_INSTRUMENTED and LLVM_BUILD_INSTRUMENTED_COVERAGE cannot both be specified")
 endif()
 
+set(LLVM_THINLTO_CACHE_PATH "${PROJECT_BINARY_DIR}/lto.cache" CACHE STRING "Set ThinLTO cache path. This can be used when building LLVM from several different directiories.")
+
 if(LLVM_ENABLE_LTO AND LLVM_ON_WIN32 AND NOT LINKER_IS_LLD_LINK AND NOT MINGW)
   message(FATAL_ERROR "When compiling for Windows, LLVM_ENABLE_LTO requires using lld as the linker (point CMAKE_LINKER at lld-link.exe)")
 endif()
@@ -1095,16 +1088,16 @@ if(uppercase_LLVM_ENABLE_LTO STREQUAL "THIN")
   # improves incremental build time.
   # FIXME: We should move all this logic into the clang driver.
   if(APPLE)
-    append("-Wl,-cache_path_lto,${PROJECT_BINARY_DIR}/lto.cache"
+    append("-Wl,-cache_path_lto,${LLVM_THINLTO_CACHE_PATH}"
            CMAKE_EXE_LINKER_FLAGS CMAKE_SHARED_LINKER_FLAGS)
   elseif((UNIX OR MINGW) AND LLVM_USE_LINKER STREQUAL "lld")
-    append("-Wl,--thinlto-cache-dir=${PROJECT_BINARY_DIR}/lto.cache"
+    append("-Wl,--thinlto-cache-dir=${LLVM_THINLTO_CACHE_PATH}"
            CMAKE_EXE_LINKER_FLAGS CMAKE_SHARED_LINKER_FLAGS)
   elseif(LLVM_USE_LINKER STREQUAL "gold")
-    append("-Wl,--plugin-opt,cache-dir=${PROJECT_BINARY_DIR}/lto.cache"
+    append("-Wl,--plugin-opt,cache-dir=${LLVM_THINLTO_CACHE_PATH}"
            CMAKE_EXE_LINKER_FLAGS CMAKE_SHARED_LINKER_FLAGS)
   elseif(LINKER_IS_LLD_LINK)
-    append("/lldltocache:${PROJECT_BINARY_DIR}/lto.cache"
+    append("/lldltocache:${LLVM_THINLTO_CACHE_PATH}"
            CMAKE_EXE_LINKER_FLAGS CMAKE_SHARED_LINKER_FLAGS)
   endif()
 elseif(uppercase_LLVM_ENABLE_LTO STREQUAL "FULL")
@@ -1236,6 +1229,7 @@ endif()
 set(LLVM_ENABLE_EXPERIMENTAL_DEPSCAN OFF CACHE BOOL
   "Use the experimental -fdepscan and related flags")
 set(LLVM_DEPSCAN_MODE "" CACHE STRING "Mode for -fdepscan if used")
+set(LLVM_DEPSCAN_DAEMON "" CACHE STRING "Path to existing DepScan daemon to use")
 set(LLVM_CAS_BUILTIN_PATH "" CACHE STRING "Path to pass for -fcas-builtin-path")
 set(LLVM_CAS_BUILTIN_PATH_Default "/^llvm::cas::builtin::default/llvm.cas.builtin.default")
 if (LLVM_CAS_BUILTIN_PATH)
@@ -1255,20 +1249,24 @@ if(LLVM_ENABLE_EXPERIMENTAL_DEPSCAN)
   endif()
 
   if(SUPPORTS_DEPSCAN)
-    check_c_compiler_flag("-fdepscan=off -fdepscan-share-stop=cmake" SUPPORTS_DEPSCAN_SHARE)
-    if(SUPPORTS_DEPSCAN_SHARE)
-      get_filename_component(CMAKE_MAKE_PROGRAM_NAME "${CMAKE_MAKE_PROGRAM}" NAME)
-      if(CMAKE_GENERATOR STREQUAL "Ninja")
-        # Ninja should always be direct parent of clang invocations (except
-        # during configuration). Avoid unnecessary ancestor searches.
-        set(fdepscan_share "-fdepscan-share-parent")
-      else()
-        # Other build systems may use subshells.
-        set(fdepscan_share "-fdepscan-share")
-      endif()
+    if(LLVM_DEPSCAN_DAEMON)
+      append("-fdepscan-daemon=${LLVM_DEPSCAN_DAEMON}" CMAKE_C_FLAGS CMAKE_CXX_FLAGS)
+    else()
+      check_c_compiler_flag("-fdepscan=off -fdepscan-share-stop=cmake" SUPPORTS_DEPSCAN_SHARE)
+      if(SUPPORTS_DEPSCAN_SHARE)
+        get_filename_component(CMAKE_MAKE_PROGRAM_NAME "${CMAKE_MAKE_PROGRAM}" NAME)
+        if(CMAKE_GENERATOR STREQUAL "Ninja")
+          # Ninja should always be direct parent of clang invocations (except
+          # during configuration). Avoid unnecessary ancestor searches.
+          set(fdepscan_share "-fdepscan-share-parent")
+        else()
+          # Other build systems may use subshells.
+          set(fdepscan_share "-fdepscan-share")
+        endif()
 
-      append("${fdepscan_share}=${CMAKE_MAKE_PROGRAM_NAME}" CMAKE_C_FLAGS CMAKE_CXX_FLAGS)
-      append("-fdepscan-share-stop=cmake" CMAKE_C_FLAGS CMAKE_CXX_FLAGS)
+        append("${fdepscan_share}=${CMAKE_MAKE_PROGRAM_NAME}" CMAKE_C_FLAGS CMAKE_CXX_FLAGS)
+        append("-fdepscan-share-stop=cmake" CMAKE_C_FLAGS CMAKE_CXX_FLAGS)
+      endif()
     endif()
 
     if(LLVM_ENABLE_PROJECTS_USED)
@@ -1297,8 +1295,11 @@ if(LLVM_ENABLE_EXPERIMENTAL_DEPSCAN)
 endif()
 
 set(LLVM_ENABLE_EXPERIMENTAL_CAS_TOKEN_CACHE OFF CACHE BOOL
-    "Cache tokens using -Xclang -fcas-cache-tokens")
+    "Cache tokens using -fexperimental-cache=raw-lex")
 if(LLVM_ENABLE_EXPERIMENTAL_CAS_TOKEN_CACHE)
+  # FIXME: Update this to check -fexperimental-cache=raw-lex once (1) it exists
+  # and (2) it's available in the toolchains we care about. After that we can
+  # drop the -fcas-token-cache alias.
   check_c_compiler_flag("-Xclang -fcas-token-cache" SUPPORTS_CAS_TOKEN_CACHE)
   if(SUPPORTS_CAS_TOKEN_CACHE)
     append("-Xclang" CMAKE_C_FLAGS CMAKE_CXX_FLAGS)

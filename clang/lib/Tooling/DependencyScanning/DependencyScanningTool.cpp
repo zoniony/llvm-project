@@ -11,34 +11,36 @@
 #include "llvm/CAS/CASDB.h"
 #include "llvm/CAS/CachingOnDiskFileSystem.h"
 
-namespace clang{
-namespace tooling{
-namespace dependencies{
+namespace clang {
+namespace tooling {
+namespace dependencies {
 
-std::vector<std::string> FullDependencies::getAdditionalArgs(
-    std::function<StringRef(ModuleID)> LookupPCMPath,
-    std::function<const ModuleDeps &(ModuleID)> LookupModuleDeps) const {
-  std::vector<std::string> Ret = getAdditionalArgsWithoutModulePaths();
+std::vector<std::string> FullDependencies::getCommandLine(
+    std::function<StringRef(ModuleID)> LookupPCMPath) const {
+  std::vector<std::string> Ret = getCommandLineWithoutModulePaths();
 
-  std::vector<std::string> PCMPaths;
-  std::vector<std::string> ModMapPaths;
-  dependencies::detail::collectPCMAndModuleMapPaths(
-      ClangModuleDeps, LookupPCMPath, LookupModuleDeps, PCMPaths, ModMapPaths);
-  for (const std::string &PCMPath : PCMPaths)
-    Ret.push_back("-fmodule-file=" + PCMPath);
+  for (ModuleID MID : ClangModuleDeps)
+    Ret.push_back(("-fmodule-file=" + LookupPCMPath(MID)).str());
 
   return Ret;
 }
 
 std::vector<std::string>
-FullDependencies::getAdditionalArgsWithoutModulePaths() const {
-  std::vector<std::string> Args{
-      "-fno-implicit-modules",
-      "-fno-implicit-module-maps",
-  };
+FullDependencies::getCommandLineWithoutModulePaths() const {
+  std::vector<std::string> Args = OriginalCommandLine;
 
+  Args.push_back("-fno-implicit-modules");
+  Args.push_back("-fno-implicit-module-maps");
   for (const PrebuiltModuleDep &PMD : PrebuiltModuleDeps)
     Args.push_back("-fmodule-file=" + PMD.PCMFile);
+
+  // This argument is unused in explicit compiles.
+  llvm::erase_if(Args, [](const std::string &Arg) {
+    return Arg.find("-fmodules-cache-path=") == 0;
+  });
+
+  // TODO: Filter out the remaining implicit modules leftovers
+  // (e.g. "-fmodules-prune-interval=" or "-fmodules-prune-after=").
 
   return Args;
 }
@@ -134,7 +136,7 @@ public:
 
   void handleContextHash(std::string) override {}
 
-  Expected<llvm::cas::TreeRef> makeTree() {
+  Expected<llvm::cas::TreeProxy> makeTree() {
     if (E)
       return std::move(E);
     return Builder->create();
@@ -154,9 +156,9 @@ private:
 };
 }
 
-llvm::Expected<llvm::cas::TreeRef> DependencyScanningTool::getDependencyTree(
+llvm::Expected<llvm::cas::TreeProxy> DependencyScanningTool::getDependencyTree(
     const std::vector<std::string> &CommandLine, StringRef CWD) {
-  llvm::cas::CachingOnDiskFileSystem &FS = Worker.getRealFS();
+  llvm::cas::CachingOnDiskFileSystem &FS = Worker.getCASFS();
   FS.trackNewAccesses();
   MakeDependencyTree Consumer(FS);
   auto Result = Worker.computeDependencies(CWD, CommandLine, Consumer);
@@ -175,13 +177,13 @@ llvm::Expected<llvm::cas::TreeRef> DependencyScanningTool::getDependencyTree(
   return FS.createTreeFromNewAccesses();
 }
 
-llvm::Expected<llvm::cas::TreeRef>
+llvm::Expected<llvm::cas::TreeProxy>
 DependencyScanningTool::getDependencyTreeFromCompilerInvocation(
     std::shared_ptr<CompilerInvocation> Invocation, StringRef CWD,
     DiagnosticConsumer &DiagsConsumer,
     llvm::function_ref<StringRef(const llvm::vfs::CachedDirectoryEntry &)>
         RemapPath) {
-  llvm::cas::CachingOnDiskFileSystem &FS = Worker.getRealFS();
+  llvm::cas::CachingOnDiskFileSystem &FS = Worker.getCASFS();
   FS.trackNewAccesses();
   FS.setCurrentWorkingDirectory(CWD);
   MakeDependencyTree DepsConsumer(FS);
@@ -191,19 +193,6 @@ DependencyScanningTool::getDependencyTreeFromCompilerInvocation(
   //
   // FIXME: See FIXME in getDepencyTree().
   return FS.createTreeFromNewAccesses(RemapPath);
-}
-
-llvm::Expected<llvm::cas::TreeRef>
-DependencyScanningTool::getDependencyTreeFromCC1CommandLine(
-    ArrayRef<const char *> Args, StringRef CWD) {
-  llvm::cas::CachingOnDiskFileSystem &FS = Worker.getRealFS();
-  FS.trackNewAccesses();
-  MakeDependencyTree DepsConsumer(FS);
-  Worker.computeDependenciesFromCC1CommandLine(Args, CWD, DepsConsumer);
-  // return DepsConsumer.makeTree();
-  //
-  // FIXME: See FIXME in getDepencyTree().
-  return FS.createTreeFromNewAccesses();
 }
 
 llvm::Expected<FullDependenciesResult>
@@ -235,8 +224,13 @@ DependencyScanningTool::getFullDependencies(
       ContextHash = std::move(Hash);
     }
 
-    FullDependenciesResult getFullDependencies() const {
+    Expected<FullDependenciesResult>
+    getFullDependencies(const std::vector<std::string> &OriginalCommandLine,
+                        llvm::cas::CachingOnDiskFileSystem *FS) const {
       FullDependencies FD;
+
+      FD.OriginalCommandLine =
+          ArrayRef<std::string>(OriginalCommandLine).slice(1);
 
       FD.ID.ContextHash = std::move(ContextHash);
 
@@ -249,6 +243,13 @@ DependencyScanningTool::getFullDependencies(
       }
 
       FD.PrebuiltModuleDeps = std::move(PrebuiltModuleDeps);
+
+      if (FS) {
+        if (auto Tree = FS->createTreeFromNewAccesses())
+          FD.CASFileSystemRootID = Tree->getID();
+        else
+          return Tree.takeError();
+      }
 
       FullDependenciesResult FDR;
 
@@ -274,11 +275,18 @@ DependencyScanningTool::getFullDependencies(
   };
 
   FullDependencyPrinterConsumer Consumer(AlreadySeen);
+  llvm::cas::CachingOnDiskFileSystem *FS =
+      Worker.useCAS() ? &Worker.getCASFS() : nullptr;
+  if (FS) {
+    FS->trackNewAccesses();
+    FS->setCurrentWorkingDirectory(CWD);
+  }
   llvm::Error Result =
       Worker.computeDependencies(CWD, CommandLine, Consumer, ModuleName);
   if (Result)
     return std::move(Result);
-  return Consumer.getFullDependencies();
+
+  return Consumer.getFullDependencies(CommandLine, FS);
 }
 
 } // end namespace dependencies

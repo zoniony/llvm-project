@@ -9,6 +9,7 @@
 #include "llvm/CAS/HashMappedTrie.h"
 #include "llvm/ADT/Twine.h"
 #include "llvm/Support/Endian.h"
+#include "llvm/Support/SHA1.h"
 #include "gtest/gtest.h"
 
 using namespace llvm;
@@ -189,6 +190,52 @@ TEST(HashMappedTrieTest, TrieStructureSmallFinalSubtrie) {
   ASSERT_EQ("- index=0 content=fffffffffffffff[1100]", takeNextLine(DumpRef));
   ASSERT_EQ("- index=1 content=fffffffffffffff[1101]", takeNextLine(DumpRef));
   ASSERT_TRUE(DumpRef.empty());
+}
+
+TEST(HashMappedTrieTest, TrieDestructionLoop) {
+  using NumT = uint64_t;
+  struct NumWithDestructorT {
+    NumT Num;
+    operator NumT() const { return Num; }
+    ~NumWithDestructorT() {}
+  };
+
+  using HashT = std::array<uint8_t, sizeof(NumT)>;
+  using TrieT = ThreadSafeHashMappedTrie<NumT, sizeof(HashT)>;
+  using TrieWithDestructorT =
+      ThreadSafeHashMappedTrie<NumWithDestructorT, sizeof(HashT)>;
+
+  // Use the number itself in big-endian order as the hash.
+  auto hash = [](NumT Num) {
+    NumT HashN = llvm::support::endian::byte_swap(Num, llvm::support::big);
+    HashT Hash;
+    memcpy(&Hash[0], &HashN, sizeof(HashT));
+    return Hash;
+  };
+
+  // Use optionals to control when destructors are called.
+  Optional<TrieT> Trie;
+  Optional<TrieWithDestructorT> TrieWithDestructor;
+
+  // Limit the tries to 2 slots (1 bit) to generate subtries at a higher rate.
+  Trie.emplace(/*NumRootBits=*/1, /*NumSubtrieBits=*/1);
+  TrieWithDestructor.emplace(/*NumRootBits=*/1, /*NumSubtrieBits=*/1);
+
+  // Fill them up. Pick a MaxN high enough to cause a stack overflow in debug
+  // builds.
+  static constexpr uint64_t MaxN = 100000;
+  for (uint64_t N = 0; N != MaxN; ++N) {
+    HashT Hash = hash(N);
+    Trie->insert(TrieT::pointer(), TrieT::value_type(Hash, N));
+    TrieWithDestructor->insert(
+        TrieWithDestructorT::pointer(),
+        TrieWithDestructorT::value_type(Hash, NumWithDestructorT{N}));
+  }
+
+  // Destroy tries. If destruction is recursive and MaxN is high enough, these
+  // will both fail.
+  Trie.reset();
+  TrieWithDestructor.reset();
 }
 
 namespace {

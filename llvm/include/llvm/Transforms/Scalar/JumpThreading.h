@@ -16,12 +16,10 @@
 
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/DenseSet.h"
-#include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/SmallSet.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/Analysis/BlockFrequencyInfo.h"
 #include "llvm/Analysis/BranchProbabilityInfo.h"
-#include "llvm/Analysis/DomTreeUpdater.h"
 #include "llvm/IR/ValueHandle.h"
 #include <memory>
 #include <utility>
@@ -83,8 +81,8 @@ class JumpThreadingPass : public PassInfoMixin<JumpThreadingPass> {
   LazyValueInfo *LVI;
   AAResults *AA;
   DomTreeUpdater *DTU;
-  std::unique_ptr<BlockFrequencyInfo> BFI;
-  std::unique_ptr<BranchProbabilityInfo> BPI;
+  BlockFrequencyInfo *BFI;
+  BranchProbabilityInfo *BPI;
   bool HasProfileData = false;
   bool HasGuards = false;
 #ifndef LLVM_ENABLE_ABI_BREAKING_CHECKS
@@ -103,15 +101,10 @@ public:
   // Glue for old PM.
   bool runImpl(Function &F, TargetLibraryInfo *TLI, TargetTransformInfo *TTI,
                LazyValueInfo *LVI, AAResults *AA, DomTreeUpdater *DTU,
-               bool HasProfileData, std::unique_ptr<BlockFrequencyInfo> BFI,
-               std::unique_ptr<BranchProbabilityInfo> BPI);
+               bool HasProfileData, BlockFrequencyInfo *BFI,
+               BranchProbabilityInfo *BPI);
 
   PreservedAnalyses run(Function &F, FunctionAnalysisManager &AM);
-
-  void releaseMemory() {
-    BFI.reset();
-    BPI.reset();
-  }
 
   void findLoopHeaders(Function &F);
   bool processBlock(BasicBlock *BB);

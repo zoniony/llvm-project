@@ -13,6 +13,7 @@
 // headers of libLLVMCASObjectFormats) but 'Encoding.h' itself should really
 // move to libLLVMSupport.
 #include "llvm/CASObjectFormats/Encoding.h"
+#include "llvm/Support/MemoryBufferRef.h"
 #include "llvm/Support/Path.h"
 #include "llvm/Support/StringSaver.h"
 
@@ -32,17 +33,14 @@ Expected<CASID> cas::readCASIDBuffer(cas::CASDB &CAS, MemoryBufferRef Buffer) {
     return std::move(E);
 
   StringRef CASIDStr = Remaining.substr(0, Size);
-  return CAS.parseCASID(CASIDStr);
+  return CAS.parseID(CASIDStr);
 }
 
-void cas::writeCASIDBuffer(cas::CASDB &CAS, const CASID &ID,
-                           llvm::raw_ostream &OS) {
+void cas::writeCASIDBuffer(const CASID &ID, llvm::raw_ostream &OS) {
   OS << casidObjectMagicPrefix;
   SmallString<256> CASIDStr;
-  {
-    raw_svector_ostream Buf(CASIDStr);
-    cantFail(CAS.printCASID(Buf, ID));
-  }
+  raw_svector_ostream(CASIDStr) << ID;
+
   // Write out the size of the CASID so that we can read it back properly even
   // if the buffer has additional padding (e.g. after getting added in an
   // archive).
@@ -53,7 +51,7 @@ void cas::writeCASIDBuffer(cas::CASDB &CAS, const CASID &ID,
 
 Error cas::walkFileTreeRecursively(
     CASDB &CAS, CASID ID,
-    function_ref<Error(const NamedTreeEntry &, Optional<TreeRef>)> Callback) {
+    function_ref<Error(const NamedTreeEntry &, Optional<TreeProxy>)> Callback) {
   BumpPtrAllocator Alloc;
   StringSaver Saver(Alloc);
   SmallString<128> PathStorage;
@@ -68,10 +66,10 @@ Error cas::walkFileTreeRecursively(
     }
 
     NamedTreeEntry Parent = Stack.pop_back_val();
-    Expected<TreeRef> ExpTree = CAS.getTree(Parent.getID());
+    Expected<TreeProxy> ExpTree = CAS.getTree(Parent.getID());
     if (Error E = ExpTree.takeError())
       return E;
-    TreeRef Tree = *ExpTree;
+    TreeProxy Tree = *ExpTree;
     if (Error E = Callback(Parent, Tree))
       return E;
     for (int I = Tree.size(), E = 0; I != E; --I) {

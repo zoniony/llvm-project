@@ -14,17 +14,18 @@
 #include "clang/Tooling/DependencyScanning/ModuleDepCollector.h"
 #include "clang/Tooling/JSONCompilationDatabase.h"
 #include "llvm/ADT/StringSet.h"
+#include "llvm/CAS/CASID.h"
 #include <string>
 
 namespace llvm {
 namespace cas {
-class TreeRef;
-}
+class TreeProxy;
+} // namespace cas
 } // namespace llvm
 
-namespace clang{
-namespace tooling{
-namespace dependencies{
+namespace clang {
+namespace tooling {
+namespace dependencies {
 
 /// The full dependencies and module graph for a specific input.
 struct FullDependencies {
@@ -48,25 +49,23 @@ struct FullDependencies {
   /// determined that the differences are benign for this compilation.
   std::vector<ModuleID> ClangModuleDeps;
 
-  /// Get additional arguments suitable for appending to the original Clang
-  /// command line.
+  /// The original command line of the TU (excluding the compiler executable).
+  std::vector<std::string> OriginalCommandLine;
+
+  /// The CASID for input file dependency tree.
+  llvm::Optional<llvm::cas::CASID> CASFileSystemRootID;
+
+  /// Get the full command line.
   ///
   /// \param LookupPCMPath This function is called to fill in "-fmodule-file="
   ///                      arguments and the "-o" argument. It needs to return
   ///                      a path for where the PCM for the given module is to
   ///                      be located.
-  /// \param LookupModuleDeps This function is called to collect the full
-  ///                         transitive set of dependencies for this
-  ///                         compilation and fill in "-fmodule-map-file="
-  ///                         arguments.
-  std::vector<std::string> getAdditionalArgs(
-      std::function<StringRef(ModuleID)> LookupPCMPath,
-      std::function<const ModuleDeps &(ModuleID)> LookupModuleDeps) const;
+  std::vector<std::string>
+  getCommandLine(std::function<StringRef(ModuleID)> LookupPCMPath) const;
 
-  /// Get additional arguments suitable for appending to the original Clang
-  /// command line, excluding arguments containing modules-related paths:
-  /// "-fmodule-file=", "-fmodule-map-file=".
-  std::vector<std::string> getAdditionalArgsWithoutModulePaths() const;
+  /// Get the full command line, excluding -fmodule-file=" arguments.
+  std::vector<std::string> getCommandLineWithoutModulePaths() const;
 };
 
 struct FullDependenciesResult {
@@ -93,18 +92,14 @@ public:
                     llvm::Optional<StringRef> ModuleName = None);
 
   /// Collect dependency tree.
-  llvm::Expected<llvm::cas::TreeRef>
+  llvm::Expected<llvm::cas::TreeProxy>
   getDependencyTree(const std::vector<std::string> &CommandLine, StringRef CWD);
 
-  llvm::Expected<llvm::cas::TreeRef> getDependencyTreeFromCompilerInvocation(
+  llvm::Expected<llvm::cas::TreeProxy> getDependencyTreeFromCompilerInvocation(
       std::shared_ptr<CompilerInvocation> Invocation, StringRef CWD,
       DiagnosticConsumer &DiagsConsumer,
       llvm::function_ref<StringRef(const llvm::vfs::CachedDirectoryEntry &)>
           RemapPath = nullptr);
-
-  llvm::Expected<llvm::cas::TreeRef>
-  getDependencyTreeFromCC1CommandLine(ArrayRef<const char *> Args,
-                                      StringRef CWD);
 
   /// Collect the full module dependency graph for the input, ignoring any
   /// modules which have already been seen. If \p ModuleName isn't empty, this
@@ -122,6 +117,19 @@ public:
   getFullDependencies(const std::vector<std::string> &CommandLine,
                       StringRef CWD, const llvm::StringSet<> &AlreadySeen,
                       llvm::Optional<StringRef> ModuleName = None);
+
+  const CASOptions &getCASOpts() const { return Worker.getCASOpts(); }
+
+  llvm::cas::CachingOnDiskFileSystem &getCachingFileSystem() {
+    return Worker.getCASFS();
+  }
+
+  /// If \p DependencyScanningService enabled sharing of \p FileManager this
+  /// will return the same instance, otherwise it will create a new one for
+  /// each invocation.
+  llvm::IntrusiveRefCntPtr<FileManager> getOrCreateFileManager() const {
+    return Worker.getOrCreateFileManager();
+  }
 
 private:
   DependencyScanningWorker Worker;

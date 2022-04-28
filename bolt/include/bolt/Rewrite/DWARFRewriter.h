@@ -51,8 +51,7 @@ class DWARFRewriter {
   /// .debug_abbrev section writer for the main binary.
   std::unique_ptr<DebugAbbrevWriter> AbbrevWriter;
 
-  using LocWriters =
-      std::unordered_map<uint64_t, std::unique_ptr<DebugLocWriter>>;
+  using LocWriters = std::map<uint64_t, std::unique_ptr<DebugLocWriter>>;
   /// Use a separate location list writer for each compilation unit
   LocWriters LocListWritersByCU;
 
@@ -68,11 +67,15 @@ class DWARFRewriter {
 
   std::mutex LocListDebugInfoPatchesMutex;
 
+  /// DWARFLegacy is all DWARF versions before DWARF 5.
+  enum class DWARFVersion { DWARFLegacy, DWARF5 };
+
   /// Update debug info for all DIEs in \p Unit.
   void updateUnitDebugInfo(DWARFUnit &Unit,
                            DebugInfoBinaryPatcher &DebugInfoPatcher,
                            DebugAbbrevWriter &AbbrevWriter,
                            DebugLocWriter &DebugLocWriter,
+                           DebugRangesSectionWriter &RangesWriter,
                            Optional<uint64_t> RangesBase = None);
 
   /// Patches the binary for an object's address ranges to be updated.
@@ -91,7 +94,8 @@ class DWARFRewriter {
                                       Optional<uint64_t> RangesBase = None);
 
   std::unique_ptr<DebugBufferVector>
-  makeFinalLocListsSection(SimpleBinaryPatcher &DebugInfoPatcher);
+  makeFinalLocListsSection(SimpleBinaryPatcher &DebugInfoPatcher,
+                           DWARFVersion Version);
 
   /// Finalize debug sections in the main binary.
   CUOffsetMap finalizeDebugSections(DebugInfoBinaryPatcher &DebugInfoPatcher);
@@ -146,11 +150,6 @@ class DWARFRewriter {
   void convertToRangesPatchDebugInfo(DWARFDie DIE, uint64_t RangesSectionOffset,
                                      SimpleBinaryPatcher &DebugInfoPatcher,
                                      Optional<uint64_t> RangesBase = None);
-
-  /// Patch DW_AT_(low|high)_pc values for the \p DIE based on \p Range.
-  void patchLowHigh(DWARFDie DIE, DebugAddressRange Range,
-                    SimpleBinaryPatcher &DebugInfoPatcher,
-                    Optional<uint64_t> DWOId);
 
   /// Helper function for creating and returning per-DWO patchers/writers.
   template <class T, class Patcher>

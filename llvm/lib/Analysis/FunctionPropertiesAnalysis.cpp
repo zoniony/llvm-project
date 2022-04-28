@@ -12,6 +12,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "llvm/Analysis/FunctionPropertiesAnalysis.h"
+#include "llvm/Analysis/LoopInfo.h"
 #include "llvm/IR/Instructions.h"
 
 using namespace llvm;
@@ -72,7 +73,7 @@ void FunctionPropertiesInfo::print(raw_ostream &OS) const {
 
 AnalysisKey FunctionPropertiesAnalysis::Key;
 
-FunctionPropertiesInfo
+const FunctionPropertiesInfo
 FunctionPropertiesAnalysis::run(Function &F, FunctionAnalysisManager &FAM) {
   return FunctionPropertiesInfo::getFunctionPropertiesInfo(
       F, FAM.getResult<LoopAnalysis>(F));

@@ -31,9 +31,10 @@
 #include "llvm/CodeGen/TargetLowering.h"
 #include "llvm/CodeGen/TargetRegisterInfo.h"
 #include "llvm/CodeGen/TargetSubtargetInfo.h"
-#include "llvm/DebugInfo/DWARF/DWARFExpression.h"
 #include "llvm/DebugInfo/DWARF/DWARFDataExtractor.h"
+#include "llvm/DebugInfo/DWARF/DWARFExpression.h"
 #include "llvm/IR/Constants.h"
+#include "llvm/IR/DIBuilder.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/GlobalVariable.h"
 #include "llvm/IR/Module.h"
@@ -45,14 +46,11 @@
 #include "llvm/MC/MCTargetOptions.h"
 #include "llvm/MC/MachineLocation.h"
 #include "llvm/MC/SectionKind.h"
-#include "llvm/Pass.h"
 #include "llvm/Support/Casting.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/MD5.h"
-#include "llvm/Support/MathExtras.h"
-#include "llvm/Support/Timer.h"
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/Target/TargetLoweringObjectFile.h"
 #include "llvm/Target/TargetMachine.h"
@@ -360,7 +358,7 @@ DwarfDebug::DwarfDebug(AsmPrinter *A)
     DebuggerTuning = Asm->TM.Options.DebuggerTuning;
   else if (IsDarwin)
     DebuggerTuning = DebuggerKind::LLDB;
-  else if (TT.isPS4CPU())
+  else if (TT.isPS4())
     DebuggerTuning = DebuggerKind::SCE;
   else if (TT.isOSAIX())
     DebuggerTuning = DebuggerKind::DBX;
@@ -2152,10 +2150,29 @@ void DwarfDebug::beginFunctionImpl(const MachineFunction *MF) {
   if (SP->getUnit()->getEmissionKind() == DICompileUnit::NoDebug)
     return;
 
-  DwarfCompileUnit &CU = getOrCreateDwarfCompileUnit(SP->getUnit());
+  // If the EmissionKind is CasFriendly, this indicates to us that we want to
+  // split up the line tables by function rather than have it as one monolithic
+  // entry. That is, every function gets its own line table header. To achieve
+  // this we are creating a new CompileUnit per function so each function can
+  // get it's own line table header
+  if (SP->getUnit()->getEmissionKind() == llvm::DICompileUnit::CasFriendly) {
+    const Module *M = MF->getFunction().getParent();
+    DIBuilder DIB(*const_cast<Module *>(M));
+    DICompileUnit *DCU = SP->getUnit();
+    DICompileUnit *NewDCU = DIB.createCompileUnit(
+        DCU->getSourceLanguage(), DCU->getFile(), DCU->getProducer(),
+        DCU->isOptimized(), DCU->getFlags(), DCU->getRuntimeVersion());
 
-  Asm->OutStreamer->getContext().setDwarfCompileUnitID(
-      getDwarfCompileUnitIDForLineTable(CU));
+    this->SingleCU = false;
+    DwarfCompileUnit &CU = getOrCreateDwarfCompileUnit(NewDCU);
+    Asm->OutStreamer->getContext().setDwarfCompileUnitID(
+        getDwarfCompileUnitIDForLineTable(CU));
+    SP->replaceUnit(NewDCU);
+  } else {
+    DwarfCompileUnit &CU = getOrCreateDwarfCompileUnit(SP->getUnit());
+    Asm->OutStreamer->getContext().setDwarfCompileUnitID(
+        getDwarfCompileUnitIDForLineTable(CU));
+  }
 
   // Record beginning of function.
   PrologEndLoc = emitInitialLocDirective(
@@ -3447,22 +3464,6 @@ void DwarfDebug::addDwarfTypeUnitType(DwarfCompileUnit &CU,
   CU.addDIETypeSignature(RefDie, Signature);
 }
 
-DwarfDebug::NonTypeUnitContext::NonTypeUnitContext(DwarfDebug *DD)
-    : DD(DD),
-      TypeUnitsUnderConstruction(std::move(DD->TypeUnitsUnderConstruction)), AddrPoolUsed(DD->AddrPool.hasBeenUsed()) {
-  DD->TypeUnitsUnderConstruction.clear();
-  DD->AddrPool.resetUsedFlag();
-}
-
-DwarfDebug::NonTypeUnitContext::~NonTypeUnitContext() {
-  DD->TypeUnitsUnderConstruction = std::move(TypeUnitsUnderConstruction);
-  DD->AddrPool.resetUsedFlag(AddrPoolUsed);
-}
-
-DwarfDebug::NonTypeUnitContext DwarfDebug::enterNonTypeUnitContext() {
-  return NonTypeUnitContext(this);
-}
-
 // Add the Name along with its companion DIE to the appropriate accelerator
 // table (for AccelTableKind::Dwarf it's always AccelDebugNames, for
 // AccelTableKind::Apple, we use the table we got as an argument). If
@@ -3555,6 +3556,6 @@ Optional<MD5::MD5Result> DwarfDebug::getMD5AsBytes(const DIFile *File) const {
   // An MD5 checksum is 16 bytes.
   std::string ChecksumString = fromHex(Checksum->Value);
   MD5::MD5Result CKMem;
-  std::copy(ChecksumString.begin(), ChecksumString.end(), CKMem.Bytes.data());
+  std::copy(ChecksumString.begin(), ChecksumString.end(), CKMem.data());
   return CKMem;
 }

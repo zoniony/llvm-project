@@ -40,6 +40,24 @@ protected:
   }
 };
 
+TEST_P(CASDBTest, PrintIDs) {
+  std::unique_ptr<CASDB> CAS = createCAS();
+
+  Optional<CASID> ID1, ID2;
+  ASSERT_THAT_ERROR(CAS->createBlob("1").moveInto(ID1), Succeeded());
+  ASSERT_THAT_ERROR(CAS->createBlob("2").moveInto(ID2), Succeeded());
+  EXPECT_NE(ID1, ID2);
+  std::string PrintedID1 = ID1->toString();
+  std::string PrintedID2 = ID2->toString();
+  EXPECT_NE(PrintedID1, PrintedID2);
+
+  Optional<CASID> ParsedID1, ParsedID2;
+  ASSERT_THAT_ERROR(CAS->parseID(PrintedID1).moveInto(ParsedID1), Succeeded());
+  ASSERT_THAT_ERROR(CAS->parseID(PrintedID2).moveInto(ParsedID2), Succeeded());
+  EXPECT_EQ(ID1, ParsedID1);
+  EXPECT_EQ(ID2, ParsedID2);
+}
+
 TEST_P(CASDBTest, Blobs) {
   std::unique_ptr<CASDB> CAS1 = createCAS();
   StringRef ContentStrings[] = {
@@ -53,24 +71,33 @@ multiline text multiline text multiline text multiline text multiline text
 multiline text multiline text multiline text multiline text multiline text)",
   };
 
-  ExitOnError ExitOnErr("Blobs");
-
   SmallVector<CASID> IDs;
   for (StringRef Content : ContentStrings) {
     // Use StringRef::str() to create a temporary std::string. This could cause
     // problems if the CAS is storing references to the input string instead of
     // copying it.
-    IDs.push_back(ExitOnErr(CAS1->createBlob(Content)));
+    Optional<BlobProxy> Blob;
+    ASSERT_THAT_ERROR(CAS1->createBlob(Content).moveInto(Blob), Succeeded());
+    IDs.push_back(Blob->getID());
+
+    // Check basic printing of IDs.
+    EXPECT_EQ(IDs.back().toString(), IDs.back().toString());
+    if (IDs.size() > 2)
+      EXPECT_NE(IDs.front().toString(), IDs.back().toString());
   }
 
   // Check that the blobs give the same IDs later.
-  for (int I = 0, E = IDs.size(); I != E; ++I)
-    EXPECT_EQ(IDs[I], ExitOnErr(CAS1->createBlob(ContentStrings[I])));
+  for (int I = 0, E = IDs.size(); I != E; ++I) {
+    Optional<BlobProxy> Blob;
+    ASSERT_THAT_ERROR(CAS1->createBlob(ContentStrings[I]).moveInto(Blob),
+                      Succeeded());
+    EXPECT_EQ(IDs[I], Blob->getID());
+  }
 
   // Check that the blobs can be retrieved multiple times.
   for (int I = 0, E = IDs.size(); I != E; ++I) {
     for (int J = 0, JE = 3; J != JE; ++J) {
-      Optional<BlobRef> Buffer;
+      Optional<BlobProxy> Buffer;
       ASSERT_THAT_ERROR(CAS1->getBlob(IDs[I]).moveInto(Buffer), Succeeded());
       EXPECT_EQ(ContentStrings[I], **Buffer);
     }
@@ -79,16 +106,18 @@ multiline text multiline text multiline text multiline text multiline text)",
   // Confirm these blobs don't exist in a fresh CAS instance.
   std::unique_ptr<CASDB> CAS2 = createCAS();
   for (int I = 0, E = IDs.size(); I != E; ++I)
-    EXPECT_EQ(None, expectedToOptional(CAS2->getBlob(IDs[I])));
+    EXPECT_THAT_EXPECTED(CAS2->getBlob(IDs[I]), Failed());
 
   // Insert into the second CAS and confirm the IDs are stable. Getting them
   // should work now.
   for (int I = IDs.size(), E = 0; I != E; --I) {
     auto &ID = IDs[I - 1];
     auto &Content = ContentStrings[I - 1];
-    EXPECT_EQ(ID, ExitOnErr(CAS2->createBlob(Content)));
+    Optional<BlobProxy> Blob;
+    ASSERT_THAT_ERROR(CAS2->createBlob(Content).moveInto(Blob), Succeeded());
+    EXPECT_EQ(ID, Blob->getID());
 
-    Optional<BlobRef> Buffer;
+    Optional<BlobProxy> Buffer;
     ASSERT_THAT_ERROR(CAS2->getBlob(ID).moveInto(Buffer), Succeeded());
     EXPECT_EQ(Content, **Buffer);
   }
@@ -111,13 +140,26 @@ TEST_P(CASDBTest, BlobsBig) {
     ASSERT_EQ(ID1, ID2);
     String2.append(String1);
   }
+
+  // Specifically check near 1MB for objects large enough they're likely to be
+  // stored externally in an on-disk CAS and will be near a page boundary.
+  SmallString<0> Storage;
+  const size_t InterestingSize = 1024U * 1024ULL;
+  const size_t SizeE = InterestingSize + 2;
+  if (Storage.size() < SizeE)
+    Storage.resize(SizeE, '\01');
+  for (size_t Size = InterestingSize - 2; Size != SizeE; ++Size) {
+    StringRef Data(Storage.data(), Size);
+    Optional<BlobProxy> Blob;
+    ASSERT_THAT_ERROR(CAS->createBlob(Data).moveInto(Blob), Succeeded());
+    ASSERT_EQ(Data, Blob->getData());
+    ASSERT_EQ(0, Blob->getData().end()[0]);
+  }
 }
 
 TEST_P(CASDBTest, Trees) {
   std::unique_ptr<CASDB> CAS1 = createCAS();
   std::unique_ptr<CASDB> CAS2 = createCAS();
-
-  ExitOnError ExitOnErr("Trees: ");
 
   auto createBlobInBoth = [&](StringRef Content) {
     Optional<CASID> ID1, ID2;
@@ -163,7 +205,7 @@ TEST_P(CASDBTest, Trees) {
     ASSERT_THAT_ERROR(CAS1->createTree(FlatTreeEntries[I]).moveInto(ID),
                       Succeeded());
     EXPECT_EQ(FlatIDs[I], ID);
-    Optional<TreeRef> Tree;
+    Optional<TreeProxy> Tree;
     ASSERT_THAT_ERROR(CAS1->getTree(FlatIDs[I]).moveInto(Tree), Succeeded());
     EXPECT_EQ(FlatTreeEntries[I].size(), Tree->size());
 
@@ -189,12 +231,17 @@ TEST_P(CASDBTest, Trees) {
     llvm::sort(SortedEntries);
 
     // Confirm we get the same tree out of CAS2.
-    EXPECT_EQ(ID, ExitOnErr(CAS2->createTree(SortedEntries)));
+    {
+      Optional<TreeProxy> Tree;
+      ASSERT_THAT_ERROR(CAS2->createTree(SortedEntries).moveInto(Tree),
+                        Succeeded());
+      EXPECT_EQ(ID, Tree->getID());
+    }
 
     // Check that the correct entries come back.
     for (CASDB *CAS : {&*CAS1, &*CAS2}) {
-      Optional<TreeRef> Tree = expectedToOptional(CAS->getTree(ID));
-      EXPECT_TRUE(Tree);
+      Optional<TreeProxy> Tree;
+      ASSERT_THAT_ERROR(CAS->getTree(ID).moveInto(Tree), Succeeded());
       for (int I = 0, E = SortedEntries.size(); I != E; ++I)
         EXPECT_EQ(SortedEntries[I], Tree->get(I));
     }
@@ -227,16 +274,141 @@ TEST_P(CASDBTest, Trees) {
       Entries.emplace_back(NestedTrees[(I * 3 + 2) % NestedTrees.size()],
                            TreeEntry::Tree, *Name2);
     }
-    CASID ID = ExitOnErr(CAS1->createTree(Entries));
-    llvm::sort(Entries);
-    EXPECT_EQ(ID, ExitOnErr(CAS1->createTree(Entries)));
-    EXPECT_EQ(ID, ExitOnErr(CAS2->createTree(Entries)));
+    Optional<CASID> ID;
+    {
+      Optional<TreeProxy> Tree;
+      ASSERT_THAT_ERROR(CAS1->createTree(Entries).moveInto(Tree), Succeeded());
+      ID = Tree->getID();
+    }
 
+    llvm::sort(Entries);
     for (CASDB *CAS : {&*CAS1, &*CAS2}) {
-      Optional<TreeRef> Tree;
-      ASSERT_THAT_ERROR(CAS->getTree(ID).moveInto(Tree), Succeeded());
+      Optional<TreeProxy> Tree;
+      ASSERT_THAT_ERROR(CAS->createTree(Entries).moveInto(Tree), Succeeded());
+      ASSERT_EQ(*ID, Tree->getID());
+      Tree.reset();
+      ASSERT_THAT_ERROR(CAS->getTree(*ID).moveInto(Tree), Succeeded());
       for (int I = 0, E = Entries.size(); I != E; ++I)
         EXPECT_EQ(Entries[I], Tree->get(I));
+    }
+  }
+}
+
+TEST_P(CASDBTest, LeafNodes) {
+  std::unique_ptr<CASDB> CAS1 = createCAS();
+  StringRef ContentStrings[] = {
+      "word",
+      "some longer text std::string's local memory",
+      R"(multiline text multiline text multiline text multiline text
+multiline text multiline text multiline text multiline text multiline text
+multiline text multiline text multiline text multiline text multiline text
+multiline text multiline text multiline text multiline text multiline text
+multiline text multiline text multiline text multiline text multiline text
+multiline text multiline text multiline text multiline text multiline text)",
+  };
+
+  SmallVector<NodeHandle> Nodes;
+  SmallVector<CASID> IDs;
+  for (StringRef Content : ContentStrings) {
+    // Use StringRef::str() to create a temporary std::string. This could cause
+    // problems if the CAS is storing references to the input string instead of
+    // copying it.
+    Optional<NodeHandle> Node;
+    ASSERT_THAT_ERROR(
+        CAS1->storeNode(None, arrayRefFromStringRef<char>(Content))
+            .moveInto(Node),
+        Succeeded());
+    Nodes.push_back(*Node);
+
+    // Check basic printing of IDs.
+    IDs.push_back(CAS1->getObjectID(*Node));
+    EXPECT_EQ(IDs.back().toString(), IDs.back().toString());
+    EXPECT_EQ(Nodes.front(), Nodes.front());
+    EXPECT_EQ(Nodes.back(), Nodes.back());
+    EXPECT_EQ(IDs.front(), IDs.front());
+    EXPECT_EQ(IDs.back(), IDs.back());
+    if (Nodes.size() <= 1)
+      continue;
+    EXPECT_NE(Nodes.front(), Nodes.back());
+    EXPECT_NE(IDs.front(), IDs.back());
+  }
+
+  // Check that the blobs give the same IDs later.
+  for (int I = 0, E = IDs.size(); I != E; ++I) {
+    Optional<NodeHandle> Node;
+    ASSERT_THAT_ERROR(
+        CAS1->storeNode(None, arrayRefFromStringRef<char>(ContentStrings[I]))
+            .moveInto(Node),
+        Succeeded());
+    EXPECT_EQ(IDs[I], CAS1->getObjectID(*Node));
+  }
+
+  // Check that the blobs can be retrieved multiple times.
+  for (int I = 0, E = IDs.size(); I != E; ++I) {
+    for (int J = 0, JE = 3; J != JE; ++J) {
+      Optional<AnyObjectHandle> Object;
+      ASSERT_THAT_ERROR(CAS1->loadObject(IDs[I]).moveInto(Object), Succeeded());
+      ASSERT_TRUE(Object);
+      Optional<NodeHandle> Node = Object->dyn_cast<NodeHandle>();
+      ASSERT_TRUE(Node);
+      EXPECT_EQ(ContentStrings[I], CAS1->getDataString(Node->getData()));
+    }
+  }
+
+  // Confirm these blobs don't exist in a fresh CAS instance.
+  std::unique_ptr<CASDB> CAS2 = createCAS();
+  for (int I = 0, E = IDs.size(); I != E; ++I) {
+    Optional<AnyObjectHandle> Object;
+    EXPECT_THAT_EXPECTED(CAS2->loadObject(IDs[I]), Succeeded());
+    EXPECT_FALSE(Object);
+  }
+
+  // Insert into the second CAS and confirm the IDs are stable. Getting them
+  // should work now.
+  for (int I = IDs.size(), E = 0; I != E; --I) {
+    auto &ID = IDs[I - 1];
+    auto &Content = ContentStrings[I - 1];
+    Optional<NodeHandle> Node;
+    ASSERT_THAT_ERROR(
+        CAS2->storeNode(None, arrayRefFromStringRef<char>(Content))
+            .moveInto(Node),
+        Succeeded());
+    EXPECT_EQ(ID, CAS2->getObjectID(*Node));
+
+    Optional<AnyObjectHandle> Object;
+    ASSERT_THAT_ERROR(CAS2->loadObject(ID).moveInto(Object), Succeeded());
+    ASSERT_TRUE(Object);
+    Node = Object->dyn_cast<NodeHandle>();
+    ASSERT_TRUE(Node);
+    EXPECT_EQ(Content, CAS2->getDataString(Node->getData()));
+  }
+}
+
+TEST_P(CASDBTest, NodesBig) {
+  std::unique_ptr<CASDB> CAS = createCAS();
+
+  // Specifically check near 1MB for objects large enough they're likely to be
+  // stored externally in an on-disk CAS, and such that one of them will be
+  // near a page boundary.
+  SmallString<0> Storage;
+  constexpr size_t InterestingSize = 1024U * 1024ULL;
+  constexpr size_t WordSize = sizeof(void *);
+
+  // Start much smaller to account for headers.
+  constexpr size_t SizeB = InterestingSize - 8 * WordSize;
+  constexpr size_t SizeE = InterestingSize + 1;
+  if (Storage.size() < SizeE)
+    Storage.resize(SizeE, '\01');
+
+  // Avoid checking every size because this is an expensive test. Just check
+  // for data that is 8B-word-aligned, and one less.
+  for (size_t Size = SizeB; Size < SizeE; Size += WordSize) {
+    for (bool IsAligned : {false, true}) {
+      StringRef Data(Storage.data(), Size - (IsAligned ? 0 : 1));
+      Optional<NodeProxy> Node;
+      ASSERT_THAT_ERROR(CAS->createNode(None, Data).moveInto(Node), Succeeded());
+      ASSERT_EQ(Data, Node->getData());
+      ASSERT_EQ(0, Node->getData().end()[0]);
     }
   }
 }

@@ -42,7 +42,7 @@
 #include "llvm/CAS/CachingOnDiskFileSystem.h"
 #include "llvm/CAS/HierarchicalTreeBuilder.h"
 #include "llvm/CAS/Utils.h"
-#include "llvm/CASObjectFormats/SchemaBase.h"
+#include "llvm/CASObjectFormats/ObjectFormatSchemaBase.h"
 #include "llvm/Config/llvm-config.h"
 #include "llvm/LTO/LTO.h"
 #include "llvm/Object/Archive.h"
@@ -280,8 +280,8 @@ static void handleFileForDepScanning(MemoryBufferRef mbref) {
 
 static DenseMap<StringRef, ArchiveFile *> loadedArchives;
 
-static Expected<InputFile *> addCASObject(SchemaPool &CASSchemas, CASID ID,
-                                          StringRef path);
+static Expected<InputFile *> addCASObject(ObjectFormatSchemaPool &CASSchemas,
+                                          CASID ID, StringRef path);
 
 static InputFile *addFile(StringRef path, ForceLoad forceLoadArchive,
                           bool isLazy = false, bool isExplicit = true,
@@ -392,11 +392,9 @@ static InputFile *addFile(StringRef path, ForceLoad forceLoadArchive,
   case file_magic::macho_dynamically_linked_shared_lib:
   case file_magic::macho_dynamically_linked_shared_lib_stub:
   case file_magic::tapi_file:
-    if (DylibFile *dylibFile = loadDylib(mbref)) {
-      if (isExplicit)
-        dylibFile->explicitlyLinked = true;
+    if (DylibFile *dylibFile =
+            loadDylib(mbref, nullptr, /*isBundleLoader=*/false, isExplicit))
       newFile = dylibFile;
-    }
     break;
   case file_magic::bitcode:
     newFile = make<BitcodeFile>(mbref, "", 0, isLazy);
@@ -475,8 +473,8 @@ static InputFile *addFile(StringRef path, ForceLoad forceLoadArchive,
 /// \param CAS CAS database.
 /// \param ID The CASID pointing at the root node of the CAS object.
 /// \param path The object filename.
-static Expected<InputFile *> addCASObject(SchemaPool &CASSchemas, CASID ID,
-                                          StringRef path) {
+static Expected<InputFile *> addCASObject(ObjectFormatSchemaPool &CASSchemas,
+                                          CASID ID, StringRef path) {
   // FIXME: Check format from the CAS data instead of using the filename.
   if (!path.endswith(".o")) {
     return createStringError(inconvertibleErrorCode(),
@@ -499,10 +497,10 @@ static Expected<InputFile *> addCASObject(SchemaPool &CASSchemas, CASID ID,
 /// Reads a CAS tree of CAS object files.
 /// \param CAS CAS database.
 /// \param ID The CASID pointing to a tree of files.
-static Error addCASTree(SchemaPool &CASSchemas, CASID ID) {
+static Error addCASTree(ObjectFormatSchemaPool &CASSchemas, CASID ID) {
   return walkFileTreeRecursively(
       CASSchemas.getCAS(), ID,
-      [&](const NamedTreeEntry &entry, Optional<TreeRef>) -> Error {
+      [&](const NamedTreeEntry &entry, Optional<TreeProxy>) -> Error {
         if (entry.getKind() == TreeEntry::Tree)
           return Error::success();
         if (entry.getKind() != TreeEntry::Regular) {
@@ -557,7 +555,8 @@ static void addFramework(StringRef name, bool isNeeded, bool isWeak,
         config->hasReexports = true;
         dylibFile->reexport = true;
       }
-    } else if (isa<ObjFile>(file) || isa<BitcodeFile>(file)) {
+    } else if (isa_and_nonnull<ObjFile>(file) ||
+               isa_and_nonnull<BitcodeFile>(file)) {
       // Cache frameworks containing object or bitcode files to avoid duplicate
       // symbols. Frameworks containing static archives are cached separately
       // in addFile() to share caching with libraries, and frameworks
@@ -610,20 +609,6 @@ static void addFileList(StringRef path, bool isLazy) {
     addFile(rerootPath(path), ForceLoad::Default, isLazy);
 }
 
-// An order file has one entry per line, in the following format:
-//
-//   <cpu>:<object file>:<symbol name>
-//
-// <cpu> and <object file> are optional. If not specified, then that entry
-// matches any symbol of that name. Parsing this format is not quite
-// straightforward because the symbol name itself can contain colons, so when
-// encountering a colon, we consider the preceding characters to decide if it
-// can be a valid CPU type or file path.
-//
-// If a symbol is matched by multiple entries, then it takes the lowest-ordered
-// entry (the one nearest to the front of the list.)
-//
-// The file can also have line comments that start with '#'.
 // We expect sub-library names of the form "libfoo", which will match a dylib
 // with a path of .*/libfoo.{dylib, tbd}.
 // XXX ld64 seems to ignore the extension entirely when matching sub-libraries;
@@ -694,14 +679,11 @@ static void replaceCommonSymbols() {
 
     // FIXME: CommonSymbol should store isReferencedDynamically, noDeadStrip
     // and pass them on here.
-    replaceSymbol<Defined>(sym, sym->getName(), common->getFile(), isec,
-                           /*value=*/0,
-                           /*size=*/0,
-                           /*isWeakDef=*/false,
-                           /*isExternal=*/true, common->privateExtern,
-                           /*isThumb=*/false,
-                           /*isReferencedDynamically=*/false,
-                           /*noDeadStrip=*/false);
+    replaceSymbol<Defined>(
+        sym, sym->getName(), common->getFile(), isec, /*value=*/0, /*size=*/0,
+        /*isWeakDef=*/false, /*isExternal=*/true, common->privateExtern,
+        /*includeInSymtab=*/true, /*isThumb=*/false,
+        /*isReferencedDynamically=*/false, /*noDeadStrip=*/false);
   }
 }
 
@@ -745,20 +727,22 @@ static std::string lowerDash(StringRef s) {
                      map_iterator(s.end(), toLowerDash));
 }
 
-// Has the side-effect of setting Config::platformInfo.
-static PlatformType parsePlatformVersion(const ArgList &args) {
-  const Arg *arg = args.getLastArg(OPT_platform_version);
-  if (!arg) {
-    error("must specify -platform_version");
-    return PLATFORM_UNKNOWN;
-  }
+struct PlatformVersion {
+  PlatformType platform = PLATFORM_UNKNOWN;
+  llvm::VersionTuple minimum;
+  llvm::VersionTuple sdk;
+};
 
+static PlatformVersion parsePlatformVersion(const Arg *arg) {
+  assert(arg->getOption().getID() == OPT_platform_version);
   StringRef platformStr = arg->getValue(0);
   StringRef minVersionStr = arg->getValue(1);
   StringRef sdkVersionStr = arg->getValue(2);
 
+  PlatformVersion platformVersion;
+
   // TODO(compnerd) see if we can generate this case list via XMACROS
-  PlatformType platform =
+  platformVersion.platform =
       StringSwitch<PlatformType>(lowerDash(platformStr))
           .Cases("macos", "1", PLATFORM_MACOS)
           .Cases("ios", "2", PLATFORM_IOS)
@@ -771,17 +755,52 @@ static PlatformType parsePlatformVersion(const ArgList &args) {
           .Cases("watchos-simulator", "9", PLATFORM_WATCHOSSIMULATOR)
           .Cases("driverkit", "10", PLATFORM_DRIVERKIT)
           .Default(PLATFORM_UNKNOWN);
-  if (platform == PLATFORM_UNKNOWN)
+  if (platformVersion.platform == PLATFORM_UNKNOWN)
     error(Twine("malformed platform: ") + platformStr);
   // TODO: check validity of version strings, which varies by platform
   // NOTE: ld64 accepts version strings with 5 components
   // llvm::VersionTuple accepts no more than 4 components
   // Has Apple ever published version strings with 5 components?
-  if (config->platformInfo.minimum.tryParse(minVersionStr))
+  if (platformVersion.minimum.tryParse(minVersionStr))
     error(Twine("malformed minimum version: ") + minVersionStr);
-  if (config->platformInfo.sdk.tryParse(sdkVersionStr))
+  if (platformVersion.sdk.tryParse(sdkVersionStr))
     error(Twine("malformed sdk version: ") + sdkVersionStr);
-  return platform;
+  return platformVersion;
+}
+
+// Has the side-effect of setting Config::platformInfo.
+static PlatformType parsePlatformVersions(const ArgList &args) {
+  std::map<PlatformType, PlatformVersion> platformVersions;
+  const PlatformVersion *lastVersionInfo = nullptr;
+  for (const Arg *arg : args.filtered(OPT_platform_version)) {
+    PlatformVersion version = parsePlatformVersion(arg);
+
+    // For each platform, the last flag wins:
+    // `-platform_version macos 2 3 -platform_version macos 4 5` has the same
+    // effect as just passing `-platform_version macos 4 5`.
+    // FIXME: ld64 warns on multiple flags for one platform. Should we?
+    platformVersions[version.platform] = version;
+    lastVersionInfo = &platformVersions[version.platform];
+  }
+
+  if (platformVersions.empty()) {
+    error("must specify -platform_version");
+    return PLATFORM_UNKNOWN;
+  }
+  if (platformVersions.size() > 2) {
+    error("must specify -platform_version at most twice");
+    return PLATFORM_UNKNOWN;
+  }
+  if (platformVersions.size() == 2) {
+    // FIXME: If you implement support for this, add a diagnostic if
+    // outputType is not dylib or bundle -- linkers shouldn't be able to
+    // write zippered executables.
+    warn("writing zippered outputs not yet implemented, "
+         "ignoring all but last -platform_version flag");
+  }
+  config->platformInfo.minimum = lastVersionInfo->minimum;
+  config->platformInfo.sdk = lastVersionInfo->sdk;
+  return lastVersionInfo->platform;
 }
 
 // Has the side-effect of setting Config::target.
@@ -792,7 +811,7 @@ static TargetInfo *createTargetInfo(InputArgList &args) {
     return nullptr;
   }
 
-  PlatformType platform = parsePlatformVersion(args);
+  PlatformType platform = parsePlatformVersions(args);
   config->platformInfo.target =
       MachO::Target(getArchitectureFromName(archName), platform);
 
@@ -1101,8 +1120,7 @@ static void createFiles(const InputArgList &args) {
     case OPT_INPUT: {
       if (config->CAS) {
         StringRef casid = arg->getValue();
-        if (auto optCASID =
-                expectedToOptional(config->CAS->parseCASID(casid))) {
+        if (auto optCASID = expectedToOptional(config->CAS->parseID(casid))) {
           if (config->depScanning)
             continue; // we'll record the casid as part of the options.
           if (auto E = addCASTree(*config->CASSchemas, *optCASID)) {
@@ -1176,14 +1194,11 @@ static void gatherInputSections() {
   int inputOrder = 0;
   for (const InputFile *file : inputFiles) {
     for (const Section *section : file->sections) {
-      const Subsections &subsections = section->subsections;
-      if (subsections.empty())
-        continue;
-      if (subsections[0].isec->getName() == section_names::compactUnwind)
+      if (section->name == section_names::compactUnwind)
         // Compact unwind entries require special handling elsewhere.
         continue;
       ConcatOutputSection *osec = nullptr;
-      for (const Subsection &subsection : subsections) {
+      for (const Subsection &subsection : section->subsections) {
         if (auto *isec = dyn_cast<ConcatInputSection>(subsection.isec)) {
           if (isec->isCoalescedWeak())
             continue;
@@ -1315,7 +1330,7 @@ static bool linkWithResultCaching(InputArgList &args, bool canExitEarly,
   CASDB &CAS = *config->CAS;
 
   Optional<CASID> optCacheKey;
-  Optional<TreeRef> rootRef;
+  Optional<TreeProxy> rootRef;
   {
     TimeTraceScope timeScope("Caching: create key");
 
@@ -1328,7 +1343,6 @@ static bool linkWithResultCaching(InputArgList &args, bool canExitEarly,
             toString(cacheFS.takeError()));
       return ::link(args, canExitEarly, stdoutOS, stderrOS);
     }
-    (*cacheFS)->trackNewAccesses();
     auto originalFS = std::move(config->fs);
     config->fs = *cacheFS;
 
@@ -1363,9 +1377,8 @@ static bool linkWithResultCaching(InputArgList &args, bool canExitEarly,
   CASID cacheKey = *optCacheKey;
   Expected<CASID> result = config->CAS->getCachedResult(cacheKey);
   if (result) {
-    log("Caching: cache hit, result: " +
-        cantFail(CAS.convertCASIDToString(*result)) +
-        ", key: " + cantFail(CAS.convertCASIDToString(cacheKey)));
+    log("Caching: cache hit, result: " + result->toString() +
+        ", key: " + cacheKey.toString());
     if (Error E = replayResult(CAS, std::move(*result))) {
       error("error replaying cached result: " + toString(std::move(E)));
       return false;
@@ -1376,8 +1389,7 @@ static bool linkWithResultCaching(InputArgList &args, bool canExitEarly,
   {
     TimeTraceScope timeScope("Caching: link after cache miss");
 
-    log("Caching: cache miss, key: " +
-        cantFail(CAS.convertCASIDToString(cacheKey)));
+    log("Caching: cache miss, key: " + cacheKey.toString());
     consumeError(result.takeError());
 
     SmallString<128> workingDirectory;
@@ -1420,7 +1432,7 @@ static bool linkWithResultCaching(InputArgList &args, bool canExitEarly,
       return false;
     }
 
-    Expected<BlobRef> blob = CAS.createBlob(outBuffer->getBuffer());
+    Expected<BlobProxy> blob = CAS.createBlob(outBuffer->getBuffer());
     if (!blob) {
       error("error creating CAS blob for output: " +
             toString(blob.takeError()));
@@ -1440,8 +1452,7 @@ static bool linkWithResultCaching(InputArgList &args, bool canExitEarly,
       return false;
     }
 
-    log("Caching: cached result: " +
-        cantFail(CAS.convertCASIDToString(*resultID)));
+    log("Caching: cached result: " + resultID->getID().toString());
   }
 
   return true;
@@ -1569,7 +1580,8 @@ bool macho::link(ArrayRef<const char *> argsArr, llvm::raw_ostream &stdoutOS,
     auto CAS = llvm::cas::createOnDiskCAS(path);
     if (CAS) {
       config->CAS = std::move(*CAS);
-      config->CASSchemas = std::make_unique<SchemaPool>(*config->CAS);
+      config->CASSchemas =
+          std::make_unique<ObjectFormatSchemaPool>(*config->CAS);
     } else {
       error("error loading CAS at path '" + path +
             "': " + toString(CAS.takeError()));
@@ -1674,9 +1686,6 @@ static bool link(InputArgList &args, bool canExitEarly, raw_ostream &stdoutOS,
     config->umbrella = arg->getValue();
   }
   config->ltoObjPath = args.getLastArgValue(OPT_object_path_lto);
-  config->ltoNewPassManager =
-      args.hasFlag(OPT_no_lto_legacy_pass_manager, OPT_lto_legacy_pass_manager,
-                   LLVM_ENABLE_NEW_PASS_MANAGER);
   config->ltoo = args::getInteger(args, OPT_lto_O, 2);
   if (config->ltoo > 3)
     error("--lto-O: invalid optimization level: " + Twine(config->ltoo));
@@ -1822,6 +1831,11 @@ static bool link(InputArgList &args, bool canExitEarly, raw_ostream &stdoutOS,
     symtab->addUndefined(cachedName.val(), /*file=*/nullptr,
                          /*isWeakRef=*/false);
 
+  for (const Arg *arg : args.filtered(OPT_why_live))
+    config->whyLive.insert(arg->getValue());
+  if (!config->whyLive.empty() && !config->deadStrip)
+    warn("-why_live has no effect without -dead_strip, ignoring");
+
   config->saveTemps = args.hasArg(OPT_save_temps);
 
   config->adhocCodesign = args.hasFlag(
@@ -1899,10 +1913,8 @@ static bool link(InputArgList &args, bool canExitEarly, raw_ostream &stdoutOS,
     replaceCommonSymbols();
 
     StringRef orderFile = args.getLastArgValue(OPT_order_file);
-    if (!orderFile.empty()) {
-      parseOrderFile(orderFile);
-      config->callGraphProfileSort = false;
-    }
+    if (!orderFile.empty())
+      priorityBuilder.parseOrderFile(orderFile);
 
     referenceStubBinder();
 
@@ -1959,7 +1971,7 @@ static bool link(InputArgList &args, bool canExitEarly, raw_ostream &stdoutOS,
 
     gatherInputSections();
     if (config->callGraphProfileSort)
-      extractCallGraphProfile();
+      priorityBuilder.extractCallGraphProfile();
 
     if (config->deadStrip)
       markLive();

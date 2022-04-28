@@ -1,4 +1,3 @@
-// UNSUPPORTED: cas
 // RUN: rm -rf %t.dir
 // RUN: rm -rf %t.cdb
 // RUN: mkdir -p %t.dir
@@ -11,31 +10,26 @@
 // RUN: sed -e "s|DIR|%/t.dir|g" %S/Inputs/modules_cdb.json > %t.cdb
 // RUN: sed -e "s|DIR|%/t.dir|g" %S/Inputs/modules_cdb_clangcl.json > %t_clangcl.cdb
 //
-// RUN: echo %t.dir > %t.result
 // RUN: clang-scan-deps -compilation-database %t.cdb -j 4 -format experimental-full \
-// RUN:   -mode preprocess-minimized-sources >> %t.result
-// RUN: cat %t.result | sed 's:\\\\\?:/:g' | FileCheck --check-prefixes=CHECK,CHECK-NO-ABS %s
+// RUN:   -mode preprocess-minimized-sources > %t.result
+// RUN: cat %t.result | sed 's:\\\\\?:/:g' | FileCheck -DPREFIX=%/t.dir --check-prefixes=CHECK,CHECK-NO-ABS %s
 //
-// RUN: echo %t.dir > %t.result
 // RUN: clang-scan-deps -compilation-database %t.cdb -j 4 -format experimental-full \
-// RUN:   -generate-modules-path-args -mode preprocess-minimized-sources >> %t.result
-// RUN: cat %t.result | sed 's:\\\\\?:/:g' | FileCheck --check-prefixes=CHECK,CHECK-ABS %s
+// RUN:   -generate-modules-path-args -mode preprocess-minimized-sources > %t.result
+// RUN: cat %t.result | sed 's:\\\\\?:/:g' | FileCheck -DPREFIX=%/t.dir --check-prefixes=CHECK,CHECK-ABS %s
 //
-// RUN: echo %t.dir > %t.result
 // RUN: clang-scan-deps -compilation-database %t.cdb -j 4 -format experimental-full \
 // RUN:   -generate-modules-path-args -module-files-dir %t.dir/custom \
-// RUN:   -mode preprocess-minimized-sources >> %t.result
-// RUN: cat %t.result | sed 's:\\\\\?:/:g' | FileCheck --check-prefixes=CHECK,CHECK-CUSTOM %s
+// RUN:   -mode preprocess-minimized-sources > %t.result
+// RUN: cat %t.result | sed 's:\\\\\?:/:g' | FileCheck -DPREFIX=%/t.dir --check-prefixes=CHECK,CHECK-CUSTOM %s
 //
-// RUN: echo %t.dir > %t_clangcl.result
 // RUN: clang-scan-deps -compilation-database %t_clangcl.cdb -j 4 -format experimental-full \
-// RUN:   -mode preprocess-minimized-sources >> %t_clangcl.result
-// RUN: cat %t_clangcl.result | sed 's:\\\\\?:/:g' | FileCheck --check-prefixes=CHECK,CHECK-NO-ABS %s
+// RUN:   -mode preprocess-minimized-sources > %t_clangcl.result
+// RUN: cat %t_clangcl.result | sed 's:\\\\\?:/:g' | FileCheck -DPREFIX=%/t.dir --check-prefixes=CHECK,CHECK-NO-ABS %s
 
 #include "header.h"
 
-// CHECK: [[PREFIX:.*]]
-// CHECK-NEXT: {
+// CHECK:      {
 // CHECK-NEXT:   "modules": [
 // CHECK-NEXT:     {
 // CHECK-NEXT:       "clang-module-deps": [
@@ -51,6 +45,7 @@
 // CHECK-NO-ABS-NOT:   "-fmodule-file={{.*}}"
 // CHECK-ABS:          "-fmodule-file=[[PREFIX]]/module-cache{{(_clangcl)?}}/[[HASH_H2_DINCLUDE]]/header2-{{[A-Z0-9]+}}.pcm"
 // CHECK-CUSTOM:       "-fmodule-file=[[PREFIX]]/custom/[[HASH_H2_DINCLUDE]]/header2-{{[A-Z0-9]+}}.pcm"
+// CHECK-NOT:          "-fimplicit-module-maps"
 // CHECK:              "-fmodule-name=header1"
 // CHECK:              "-fno-implicit-modules"
 // CHECK:            ],
@@ -67,6 +62,7 @@
 // CHECK-NEXT:       "command-line": [
 // CHECK-NEXT:         "-cc1",
 // CHECK:              "-emit-module",
+// CHECK-NOT:          "-fimplicit-module-maps",
 // CHECK:              "-fmodule-name=header1",
 // CHECK:              "-fno-implicit-modules",
 // CHECK:            ],
@@ -84,6 +80,7 @@
 // CHECK-NEXT:         "-cc1",
 // CHECK:              "-emit-module",
 // CHECK:              "-fmodule-name=header2",
+// CHECK-NOT:          "-fimplicit-module-maps",
 // CHECK:              "-fno-implicit-modules",
 // CHECK:            ],
 // CHECK-NEXT:       "context-hash": "[[HASH_H2_DINCLUDE]]",
@@ -104,7 +101,7 @@
 // CHECK-NEXT:         }
 // CHECK-NEXT:       ],
 // CHECK-NEXT:       "command-line": [
-// CHECK-NEXT:         "-fno-implicit-modules"
+// CHECK:              "-fno-implicit-modules"
 // CHECK-NEXT:         "-fno-implicit-module-maps"
 // CHECK-NO-ABS-NOT:   "-fmodule-file={{.*}}"
 // CHECK-ABS-NEXT:     "-fmodule-file=[[PREFIX]]/module-cache{{(_clangcl)?}}/[[HASH_H1]]/header1-{{[A-Z0-9]+}}.pcm"
@@ -124,7 +121,7 @@
 // CHECK-NEXT:         }
 // CHECK-NEXT:       ],
 // CHECK-NEXT:       "command-line": [
-// CHECK-NEXT:         "-fno-implicit-modules"
+// CHECK:              "-fno-implicit-modules"
 // CHECK-NEXT:         "-fno-implicit-module-maps"
 // CHECK-NO-ABS-NOT:   "-fmodule-file={{.*}},
 // CHECK-ABS-NEXT:     "-fmodule-file=[[PREFIX]]/module-cache{{(_clangcl)?}}/[[HASH_H1]]/header1-{{[A-Z0-9]+}}.pcm"
@@ -144,7 +141,7 @@
 // CHECK-NEXT:         }
 // CHECK-NEXT:       ],
 // CHECK-NEXT:       "command-line": [
-// CHECK-NEXT:         "-fno-implicit-modules"
+// CHECK:              "-fno-implicit-modules"
 // CHECK-NEXT:         "-fno-implicit-module-maps"
 // CHECK-NO-ABS-NOT:   "-fmodule-file={{.*}}"
 // CHECK-ABS-NEXT:     "-fmodule-file=[[PREFIX]]/module-cache{{(_clangcl)?}}/[[HASH_H1]]/header1-{{[A-Z0-9]+}}.pcm"
@@ -164,12 +161,10 @@
 // CHECK-NEXT:         }
 // CHECK-NEXT:       ],
 // CHECK-NEXT:       "command-line": [
-// CHECK-NEXT:         "-fno-implicit-modules"
+// CHECK:              "-fno-implicit-modules"
 // CHECK-NEXT:         "-fno-implicit-module-maps"
 // CHECK-NO-ABS-NOT:   "-fmodule-file={{.*}}"
-// CHECK-ABS-NEXT:     "-fmodule-file=[[PREFIX]]/module-cache{{(_clangcl)?}}/[[HASH_H2_DINCLUDE]]/header2-{{[A-Z0-9]+}}.pcm"
 // CHECK-ABS-NEXT:     "-fmodule-file=[[PREFIX]]/module-cache{{(_clangcl)?}}/[[HASH_H1_DINCLUDE]]/header1-{{[A-Z0-9]+}}.pcm"
-// CHECK-CUSTOM-NEXT:  "-fmodule-file=[[PREFIX]]/custom/[[HASH_H2_DINCLUDE]]/header2-{{[A-Z0-9]+}}.pcm"
 // CHECK-CUSTOM-NEXT:  "-fmodule-file=[[PREFIX]]/custom/[[HASH_H1_DINCLUDE]]/header1-{{[A-Z0-9]+}}.pcm"
 // CHECK-NEXT:       ],
 // CHECK-NEXT:       "file-deps": [

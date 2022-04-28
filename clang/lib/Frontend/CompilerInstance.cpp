@@ -160,9 +160,7 @@ llvm::vfs::FileSystem &CompilerInstance::getVirtualFileSystem() const {
   return getFileManager().getVirtualFileSystem();
 }
 
-void CompilerInstance::setFileManager(FileManager *Value) {
-  FileMgr = Value;
-}
+void CompilerInstance::setFileManager(FileManager *Value) { FileMgr = Value; }
 
 void CompilerInstance::setSourceManager(SourceManager *Value) {
   SourceMgr = Value;
@@ -233,7 +231,7 @@ static void collectIncludePCH(CompilerInstance &CI,
 
   StringRef PCHInclude = PPOpts.ImplicitPCHInclude;
   FileManager &FileMgr = CI.getFileManager();
-  auto PCHDir = FileMgr.getDirectory(PCHInclude);
+  auto PCHDir = FileMgr.getOptionalDirectoryRef(PCHInclude);
   if (!PCHDir) {
     MDC->addFile(PCHInclude);
     return;
@@ -241,7 +239,7 @@ static void collectIncludePCH(CompilerInstance &CI,
 
   std::error_code EC;
   SmallString<128> DirNative;
-  llvm::sys::path::native((*PCHDir)->getName(), DirNative);
+  llvm::sys::path::native(PCHDir->getName(), DirNative);
   llvm::vfs::FileSystem &FS = FileMgr.getVirtualFileSystem();
   SimpleASTReaderListener Validator(CI.getPreprocessor());
   for (llvm::vfs::directory_iterator Dir = FS.dir_begin(DirNative, EC), DirEnd;
@@ -375,7 +373,7 @@ FileManager *CompilerInstance::createFileManager(
   if (!VFS)
     VFS = FileMgr ? &FileMgr->getVirtualFileSystem()
                   : createVFSFromCompilerInvocation(getInvocation(),
-                                                    getDiagnostics());
+                                                    getDiagnostics(), CAS);
   assert(VFS && "FileManager has no VFS?");
   FileMgr = new FileManager(getFileSystemOpts(), std::move(VFS));
   return FileMgr.get();
@@ -447,7 +445,6 @@ static void InitializeFileRemapping(DiagnosticsEngine &Diags,
 
 void CompilerInstance::createPreprocessor(TranslationUnitKind TUKind) {
   const PreprocessorOptions &PPOpts = getPreprocessorOpts();
-  const CASOptions &CASOpts = getInvocation().getCASOpts();
 
   // The AST reader holds a reference to the old preprocessor (if any).
   TheASTReader.reset();
@@ -465,13 +462,14 @@ void CompilerInstance::createPreprocessor(TranslationUnitKind TUKind) {
   PP->Initialize(getTarget(), getAuxTarget());
 
   // Create a PTH manager if we are using some form of a token cache.
-  if (CASOpts.CASTokenCache) {
+  if (PPOpts.CacheRawLex) {
+    // FIXME: Should not require the filesystem to do CAS ingestion. Instead,
+    // token-caching can fall back to ingesting into an in-memory CAS itself.
     llvm::vfs::FileSystem &FS = getFileManager().getVirtualFileSystem();
-
-    // FIXME: use dyn_cast here.
     if (FS.isCASFS())
       PP->setPTHManager(std::make_unique<PTHManager>(
-          &static_cast<llvm::cas::CASFileSystemBase &>(FS), *PP));
+          getOrCreateCAS(), &static_cast<llvm::cas::CASFileSystemBase &>(FS),
+          *PP));
   }
 
   if (PPOpts.DetailedRecord)
@@ -842,6 +840,18 @@ llvm::vfs::OutputBackend &CompilerInstance::getOrCreateOutputBackend() {
   if (!hasOutputBackend())
     createOutputBackend();
   return getOutputBackend();
+}
+
+llvm::cas::CASDB &CompilerInstance::getOrCreateCAS() {
+  if (CAS)
+    return *CAS;
+
+  // Create a new CAS instance from the CompilerInvocation. Future calls to
+  // createFileManager() will use the same CAS.
+  CAS = getInvocation().getCASOpts().getOrCreateCAS(
+      getDiagnostics(),
+      /*CreateEmptyCASOnFailure=*/true);
+  return *CAS;
 }
 
 std::unique_ptr<raw_pwrite_stream>

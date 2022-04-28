@@ -56,9 +56,11 @@ public:
     InputClass = 0,
     BindArchClass,
     OffloadClass,
+    DepscanJobClass,
     PreprocessJobClass,
     PrecompileJobClass,
     HeaderModulePrecompileJobClass,
+    ExtractAPIJobClass,
     AnalyzeJobClass,
     MigrateJobClass,
     CompileJobClass,
@@ -76,7 +78,7 @@ public:
     LinkerWrapperJobClass,
     StaticLibJobClass,
 
-    JobClassFirst = PreprocessJobClass,
+    JobClassFirst = DepscanJobClass,
     JobClassLast = StaticLibJobClass
   };
 
@@ -188,6 +190,11 @@ public:
   /// Append the host offload info of this action and propagate it to its
   /// dependences.
   void propagateHostOffloadInfo(unsigned OKinds, const char *OArch);
+
+  void setHostOffloadInfo(unsigned OKinds, const char *OArch) {
+    ActiveOffloadKindMask |= OKinds;
+    OffloadingArch = OArch;
+  }
 
   /// Set the offload info of this action to be the same as the provided action,
   /// and propagate it to its dependences.
@@ -392,6 +399,23 @@ public:
   }
 };
 
+class DepscanJobAction : public JobAction {
+  void anchor() override;
+
+public:
+  DepscanJobAction(Action *Input, types::ID OutputType);
+
+  static bool classof(const Action *A) {
+    return A->getKind() == DepscanJobClass;
+  }
+
+  const JobAction &getScanningJobAction() const { return *JA; }
+  void setScanningJobAction(const JobAction *Job) { JA = Job; }
+
+private:
+  const JobAction *JA;
+};
+
 class PreprocessJobAction : public JobAction {
   void anchor() override;
 
@@ -436,6 +460,19 @@ public:
   }
 
   const char *getModuleName() const { return ModuleName; }
+};
+
+class ExtractAPIJobAction : public JobAction {
+  void anchor() override;
+
+public:
+  ExtractAPIJobAction(Action *Input, types::ID OutputType);
+
+  static bool classof(const Action *A) {
+    return A->getKind() == ExtractAPIJobClass;
+  }
+
+  void addHeaderInput(Action *Input) { getInputs().push_back(Input); }
 };
 
 class AnalyzeJobAction : public JobAction {

@@ -14,11 +14,11 @@
 #ifndef LLVM_ANALYSIS_FUNCTIONPROPERTIESANALYSIS_H
 #define LLVM_ANALYSIS_FUNCTIONPROPERTIESANALYSIS_H
 
-#include "llvm/Analysis/LoopInfo.h"
 #include "llvm/IR/PassManager.h"
 
 namespace llvm {
 class Function;
+class LoopInfo;
 
 class FunctionPropertiesInfo {
 public:
@@ -66,7 +66,7 @@ class FunctionPropertiesAnalysis
 public:
   static AnalysisKey Key;
 
-  using Result = FunctionPropertiesInfo;
+  using Result = const FunctionPropertiesInfo;
 
   Result run(Function &F, FunctionAnalysisManager &FAM);
 };

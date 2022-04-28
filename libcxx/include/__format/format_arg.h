@@ -10,12 +10,14 @@
 #ifndef _LIBCPP___FORMAT_FORMAT_ARG_H
 #define _LIBCPP___FORMAT_FORMAT_ARG_H
 
+#include <__assert>
 #include <__concepts/arithmetic.h>
 #include <__config>
 #include <__format/format_error.h>
 #include <__format/format_fwd.h>
 #include <__format/format_parse_context.h>
 #include <__memory/addressof.h>
+#include <__utility/unreachable.h>
 #include <__variant/monostate.h>
 #include <string>
 #include <string_view>
@@ -27,12 +29,6 @@
 _LIBCPP_BEGIN_NAMESPACE_STD
 
 #if _LIBCPP_STD_VER > 17
-
-// TODO FMT Remove this once we require compilers with proper C++20 support.
-// If the compiler has no concepts support, the format header will be disabled.
-// Without concepts support enable_if needs to be used and that too much effort
-// to support compilers with partial C++20 support.
-#if !defined(_LIBCPP_HAS_NO_CONCEPTS)
 
 namespace __format {
 /// The type stored in @ref basic_format_arg.
@@ -77,7 +73,7 @@ visit_format_arg(_Visitor&& __vis, basic_format_arg<_Context> __arg) {
 #ifndef _LIBCPP_HAS_NO_INT128
     return _VSTD::invoke(_VSTD::forward<_Visitor>(__vis), __arg.__i128);
 #else
-    _LIBCPP_UNREACHABLE();
+    __libcpp_unreachable();
 #endif
   case __format::__arg_t::__unsigned:
     return _VSTD::invoke(_VSTD::forward<_Visitor>(__vis), __arg.__unsigned);
@@ -88,7 +84,7 @@ visit_format_arg(_Visitor&& __vis, basic_format_arg<_Context> __arg) {
 #ifndef _LIBCPP_HAS_NO_INT128
     return _VSTD::invoke(_VSTD::forward<_Visitor>(__vis), __arg.__u128);
 #else
-   _LIBCPP_UNREACHABLE();
+   __libcpp_unreachable();
 #endif
   case __format::__arg_t::__float:
     return _VSTD::invoke(_VSTD::forward<_Visitor>(__vis), __arg.__float);
@@ -106,7 +102,7 @@ visit_format_arg(_Visitor&& __vis, basic_format_arg<_Context> __arg) {
   case __format::__arg_t::__handle:
     return _VSTD::invoke(_VSTD::forward<_Visitor>(__vis), __arg.__handle);
   }
-  _LIBCPP_UNREACHABLE();
+  __libcpp_unreachable();
 }
 
 template <class _Context>
@@ -164,17 +160,17 @@ private:
   };
   __format::__arg_t __type_;
 
-  _LIBCPP_HIDE_FROM_ABI explicit basic_format_arg(bool __v) noexcept
+  _LIBCPP_HIDE_FROM_ABI explicit basic_format_arg(const bool& __v) noexcept
       : __boolean(__v), __type_(__format::__arg_t::__boolean) {}
 
   template <class _Tp>
-  _LIBCPP_HIDE_FROM_ABI explicit basic_format_arg(_Tp __v) noexcept
+  _LIBCPP_HIDE_FROM_ABI explicit basic_format_arg(const _Tp& __v) noexcept
       requires(same_as<_Tp, char_type> ||
                (same_as<_Tp, char> && same_as<char_type, wchar_t>))
       : __char_type(__v), __type_(__format::__arg_t::__char_type) {}
 
   template <__libcpp_signed_integer _Tp>
-  _LIBCPP_HIDE_FROM_ABI explicit basic_format_arg(_Tp __v) noexcept {
+  _LIBCPP_HIDE_FROM_ABI explicit basic_format_arg(const _Tp& __v) noexcept {
     if constexpr (sizeof(_Tp) <= sizeof(int)) {
       __int = static_cast<int>(__v);
       __type_ = __format::__arg_t::__int;
@@ -193,7 +189,7 @@ private:
   }
 
   template <__libcpp_unsigned_integer _Tp>
-  _LIBCPP_HIDE_FROM_ABI explicit basic_format_arg(_Tp __v) noexcept {
+  _LIBCPP_HIDE_FROM_ABI explicit basic_format_arg(const _Tp& __v) noexcept {
     if constexpr (sizeof(_Tp) <= sizeof(unsigned)) {
       __unsigned = static_cast<unsigned>(__v);
       __type_ = __format::__arg_t::__unsigned;
@@ -276,8 +272,6 @@ private:
           __ctx.advance_to(__f.format(*static_cast<const _Tp*>(__ptr), __ctx));
         }) {}
 };
-
-#endif // !defined(_LIBCPP_HAS_NO_CONCEPTS)
 
 #endif //_LIBCPP_STD_VER > 17
 

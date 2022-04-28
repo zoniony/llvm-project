@@ -9,6 +9,8 @@
 #ifndef LLVM_CLANG_TOOLING_DEPENDENCYSCANNING_DEPENDENCYSCANNINGSERVICE_H
 #define LLVM_CLANG_TOOLING_DEPENDENCYSCANNING_DEPENDENCYSCANNINGSERVICE_H
 
+#include "clang/CAS/CASOptions.h"
+#include "clang/Tooling/DependencyScanning/DependencyScanningCASFilesystem.h"
 #include "clang/Tooling/DependencyScanning/DependencyScanningFilesystem.h"
 
 namespace clang {
@@ -43,6 +45,10 @@ enum class ScanningOutputFormat {
 
   /// This emits the CAS ID of the scanned files.
   Tree,
+
+  /// This emits the full dependency graph but with CAS tree embedded as file
+  /// dependency.
+  FullTree,
 };
 
 /// The dependency scanning service contains the shared state that is used by
@@ -50,7 +56,7 @@ enum class ScanningOutputFormat {
 class DependencyScanningService {
 public:
   DependencyScanningService(
-      ScanningMode Mode, ScanningOutputFormat Format,
+      ScanningMode Mode, ScanningOutputFormat Format, CASOptions CASOpts,
       IntrusiveRefCntPtr<llvm::cas::CachingOnDiskFileSystem> SharedFS,
       bool ReuseFileManager = true, bool SkipExcludedPPRanges = true,
       bool OptimizeArgs = false, bool OverrideCASTokenCache = false);
@@ -61,19 +67,30 @@ public:
 
   ScanningOutputFormat getFormat() const { return Format; }
 
+  const CASOptions &getCASOpts() const { return CASOpts; }
+
   bool canReuseFileManager() const { return ReuseFileManager; }
 
   bool canSkipExcludedPPRanges() const { return SkipExcludedPPRanges; }
 
   bool canOptimizeArgs() const { return OptimizeArgs; }
 
+  DependencyScanningFilesystemSharedCache &getSharedCache() {
+    assert(!SharedFS && "Expected not to have a CASFS");
+    assert(SharedCache && "Expected a shared cache");
+    return *SharedCache;
+  }
+
   bool overrideCASTokenCache() const { return OverrideCASTokenCache; }
 
   llvm::cas::CachingOnDiskFileSystem &getSharedFS() { return *SharedFS; }
 
+  bool useCASScanning() const { return (bool)SharedFS; }
+
 private:
   const ScanningMode Mode;
   const ScanningOutputFormat Format;
+  CASOptions CASOpts;
   const bool ReuseFileManager;
   /// Set to true to use the preprocessor optimization that skips excluded PP
   /// ranges by bumping the buffer pointer in the lexer instead of lexing the
@@ -83,7 +100,11 @@ private:
   const bool OptimizeArgs;
   /// CAS options.
   const bool OverrideCASTokenCache;
+  /// Shared CachingOnDiskFileSystem. Set to nullptr to not use CAS dependency
+  /// scanning.
   IntrusiveRefCntPtr<llvm::cas::CachingOnDiskFileSystem> SharedFS;
+  /// The global file system cache.
+  Optional<DependencyScanningFilesystemSharedCache> SharedCache;
 };
 
 } // end namespace dependencies

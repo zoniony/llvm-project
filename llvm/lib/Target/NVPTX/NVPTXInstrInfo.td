@@ -145,6 +145,7 @@ def noHWROT32 : Predicate<"!Subtarget->hasHWROT32()">;
 def True : Predicate<"true">;
 
 def hasPTX31 : Predicate<"Subtarget->getPTXVersion() >= 31">;
+def hasPTX42 : Predicate<"Subtarget->getPTXVersion() >= 42">;
 def hasPTX60 : Predicate<"Subtarget->getPTXVersion() >= 60">;
 def hasPTX61 : Predicate<"Subtarget->getPTXVersion() >= 61">;
 def hasPTX63 : Predicate<"Subtarget->getPTXVersion() >= 63">;
@@ -152,12 +153,16 @@ def hasPTX64 : Predicate<"Subtarget->getPTXVersion() >= 64">;
 def hasPTX65 : Predicate<"Subtarget->getPTXVersion() >= 65">;
 def hasPTX70 : Predicate<"Subtarget->getPTXVersion() >= 70">;
 def hasPTX71 : Predicate<"Subtarget->getPTXVersion() >= 71">;
+def hasPTX72 : Predicate<"Subtarget->getPTXVersion() >= 72">;
 
 def hasSM30 : Predicate<"Subtarget->getSmVersion() >= 30">;
+def hasSM32 : Predicate<"Subtarget->getSmVersion() >= 32">;
+def hasSM53 : Predicate<"Subtarget->getSmVersion() >= 53">;
 def hasSM70 : Predicate<"Subtarget->getSmVersion() >= 70">;
 def hasSM72 : Predicate<"Subtarget->getSmVersion() >= 72">;
 def hasSM75 : Predicate<"Subtarget->getSmVersion() >= 75">;
 def hasSM80 : Predicate<"Subtarget->getSmVersion() >= 80">;
+def hasSM86 : Predicate<"Subtarget->getSmVersion() >= 86">;
 
 // non-sync shfl instructions are not available on sm_70+ in PTX6.4+
 def hasSHFL : Predicate<"!(Subtarget->getSmVersion() >= 70" 
@@ -2653,6 +2658,8 @@ def BITCONVERT_64_I2F : F_BITCONVERT<"64", Int64Regs, Float64Regs>;
 def BITCONVERT_64_F2I : F_BITCONVERT<"64", Float64Regs, Int64Regs>;
 def BITCONVERT_32_I2F16x2 : F_BITCONVERT<"32", Int32Regs, Float16x2Regs>;
 def BITCONVERT_32_F16x22I : F_BITCONVERT<"32", Float16x2Regs, Int32Regs>;
+def BITCONVERT_32_F2F16x2 : F_BITCONVERT<"32", Float32Regs, Float16x2Regs>;
+def BITCONVERT_32_F16x22F : F_BITCONVERT<"32", Float16x2Regs, Float32Regs>;
 
 // NOTE: pred->fp are currently sub-optimal due to an issue in TableGen where
 // we cannot specify floating-point literals in isel patterns.  Therefore, we

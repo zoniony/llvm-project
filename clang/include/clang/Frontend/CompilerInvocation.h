@@ -9,13 +9,13 @@
 #ifndef LLVM_CLANG_FRONTEND_COMPILERINVOCATION_H
 #define LLVM_CLANG_FRONTEND_COMPILERINVOCATION_H
 
-#include "clang/Basic/CASOptions.h"
 #include "clang/Basic/CodeGenOptions.h"
 #include "clang/Basic/DiagnosticOptions.h"
 #include "clang/Basic/FileSystemOptions.h"
 #include "clang/Basic/LLVM.h"
 #include "clang/Basic/LangOptions.h"
 #include "clang/Basic/LangStandard.h"
+#include "clang/CAS/CASOptions.h"
 #include "clang/Frontend/DependencyOutputOptions.h"
 #include "clang/Frontend/FrontendOptions.h"
 #include "clang/Frontend/MigratorOptions.h"
@@ -229,19 +229,6 @@ public:
   /// executable), for finding the builtin compiler path.
   static std::string GetResourcesPath(const char *Argv0, void *MainAddr);
 
-  /// Set language defaults for the given input language and
-  /// language standard in the given LangOptions object.
-  ///
-  /// \param Opts - The LangOptions object to set up.
-  /// \param IK - The input language.
-  /// \param T - The target triple.
-  /// \param Includes - The affected list of included files.
-  /// \param LangStd - The input language standard.
-  static void
-  setLangDefaults(LangOptions &Opts, InputKind IK, const llvm::Triple &T,
-                  std::vector<std::string> &Includes,
-                  LangStandard::Kind LangStd = LangStandard::lang_unspecified);
-
   /// Retrieve a module hash string that is suitable for uniquely
   /// identifying the conditions under which the module was built.
   std::string getModuleHash() const;
@@ -258,6 +245,14 @@ public:
   void generateCC1CommandLine(llvm::SmallVectorImpl<const char *> &Args,
                               StringAllocator SA) const;
 
+  /// Parse command line options that map to \p CASOptions.
+  static bool ParseCASArgs(CASOptions &Opts, const llvm::opt::ArgList &Args,
+                           DiagnosticsEngine &Diags);
+
+  /// Generate command line options from CASOptions.
+  static void GenerateCASArgs(const CASOptions &Opts,
+                              SmallVectorImpl<const char *> &Args,
+                              CompilerInvocation::StringAllocator SA);
   /// @}
   /// @name Option Subgroups
   /// @{
@@ -339,17 +334,13 @@ private:
                                   const LangOptions *LangOpts);
 };
 
-IntrusiveRefCntPtr<llvm::vfs::FileSystem>
-createVFSFromCompilerInvocation(const CompilerInvocation &CI,
-                                DiagnosticsEngine &Diags);
+IntrusiveRefCntPtr<llvm::vfs::FileSystem> createVFSFromCompilerInvocation(
+    const CompilerInvocation &CI, DiagnosticsEngine &Diags,
+    std::shared_ptr<llvm::cas::CASDB> OverrideCAS = nullptr);
 
 IntrusiveRefCntPtr<llvm::vfs::FileSystem> createVFSFromCompilerInvocation(
     const CompilerInvocation &CI, DiagnosticsEngine &Diags,
     IntrusiveRefCntPtr<llvm::vfs::FileSystem> BaseFS);
-
-std::shared_ptr<llvm::cas::CASDB>
-createCASFromCompilerInvocation(const CompilerInvocation &CI,
-                                DiagnosticsEngine &Diags);
 
 } // namespace clang
 

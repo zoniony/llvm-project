@@ -444,6 +444,8 @@ def InlineNamespaceReopenedNoninline
 def InvalidNoreturn : DiagGroup<"invalid-noreturn">;
 def InvalidSourceEncoding : DiagGroup<"invalid-source-encoding">;
 def KNRPromotedParameter : DiagGroup<"knr-promoted-parameter">;
+def DeprecatedNonPrototype : DiagGroup<"deprecated-non-prototype">;
+def StrictPrototypes : DiagGroup<"strict-prototypes", [DeprecatedNonPrototype]>;
 def : DiagGroup<"init-self">;
 def : DiagGroup<"inline">;
 def : DiagGroup<"invalid-pch">;
@@ -502,7 +504,9 @@ def NonPODVarargs : DiagGroup<"non-pod-varargs">;
 def ClassVarargs : DiagGroup<"class-varargs", [NonPODVarargs]>;
 def : DiagGroup<"nonportable-cfstrings">;
 def NonVirtualDtor : DiagGroup<"non-virtual-dtor">;
-def NullPointerArithmetic : DiagGroup<"null-pointer-arithmetic">;
+def GNUNullPointerArithmetic : DiagGroup<"gnu-null-pointer-arithmetic">;
+def NullPointerArithmetic
+    : DiagGroup<"null-pointer-arithmetic", [GNUNullPointerArithmetic]>;
 def NullPointerSubtraction : DiagGroup<"null-pointer-subtraction">;
 def : DiagGroup<"effc++", [NonVirtualDtor]>;
 def OveralignedType : DiagGroup<"over-aligned">;
@@ -550,7 +554,9 @@ def UnalignedAccess : DiagGroup<"unaligned-access">;
 def PessimizingMove : DiagGroup<"pessimizing-move">;
 def ReturnStdMove : DiagGroup<"return-std-move">;
 
-def PointerArith : DiagGroup<"pointer-arith">;
+def GNUPointerArith : DiagGroup<"gnu-pointer-arith">;
+def PointerArith : DiagGroup<"pointer-arith", [GNUPointerArith]>;
+
 def PoundWarning : DiagGroup<"#warnings">;
 def PoundPragmaMessage : DiagGroup<"#pragma-messages">,
                          DiagCategory<"#pragma message Directive">;
@@ -1105,12 +1111,13 @@ def GNU : DiagGroup<"gnu", [GNUAlignofExpression, GNUAnonymousStruct,
                             VLAExtension, GNUFlexibleArrayInitializer,
                             GNUFlexibleArrayUnionMember, GNUFoldingConstant,
                             GNUImaginaryConstant, GNUIncludeNext,
-                            GNULabelsAsValue,
-                            RedeclaredClassMember, GNURedeclaredEnum,
-                            GNUStatementExpression, GNUStaticFloatInit,
-                            GNUStringLiteralOperatorTemplate,
-                            GNUUnionCast, GNUVariableSizedTypeNotAtEnd,
-                            ZeroLengthArray, GNUZeroLineDirective,
+                            GNULabelsAsValue, GNUNullPointerArithmetic,
+                            GNUPointerArith, RedeclaredClassMember,
+                            GNURedeclaredEnum, GNUStatementExpression,
+                            GNUStaticFloatInit,
+                            GNUStringLiteralOperatorTemplate, GNUUnionCast,
+                            GNUVariableSizedTypeNotAtEnd, ZeroLengthArray,
+                            GNUZeroLineDirective,
                             GNUZeroVariadicMacroArguments]>;
 // A warning group for warnings about code that clang accepts but gcc doesn't.
 def GccCompat : DiagGroup<"gcc-compat">;
@@ -1249,6 +1256,7 @@ def BackendWarningAttributes : DiagGroup<"attribute-warning">;
 def ProfileInstrMissing : DiagGroup<"profile-instr-missing">;
 def ProfileInstrOutOfDate : DiagGroup<"profile-instr-out-of-date">;
 def ProfileInstrUnprofiled : DiagGroup<"profile-instr-unprofiled">;
+def MisExpect : DiagGroup<"misexpect">;
 
 // AddressSanitizer frontend instrumentation remarks.
 def SanitizeAddressRemarks : DiagGroup<"sanitize-address">;
@@ -1345,10 +1353,10 @@ def RTTI : DiagGroup<"rtti">;
 def OpenCLCoreFeaturesDiagGroup : DiagGroup<"pedantic-core-features">;
 
 // Remarks for cached -cc1.
-def CASFSResultCacheMiss : DiagGroup<"cas-fs-result-cache-miss">;
-def CASFSResultCacheHit : DiagGroup<"cas-fs-result-cache-hit">;
-def CASFSResultCache : DiagGroup<"cas-fs-result-cache", [CASFSResultCacheMiss,
-                                                         CASFSResultCacheHit]>;
+def CompileJobCacheMiss : DiagGroup<"compile-job-cache-miss">;
+def CompileJobCacheHit : DiagGroup<"compile-job-cache-hit">;
+def CompileJobCache : DiagGroup<"compile-job-cache", [CompileJobCacheMiss,
+                                                      CompileJobCacheHit]>;
 
 // Warnings and extensions to make preprocessor macro usage pedantic.
 def PedanticMacros : DiagGroup<"pedantic-macros",
@@ -1360,3 +1368,6 @@ def PedanticMacros : DiagGroup<"pedantic-macros",
 
 def BranchProtection : DiagGroup<"branch-protection">;
 
+// HLSL diagnostic groups
+// Warnings for HLSL Clang extensions
+def HLSLExtension : DiagGroup<"hlsl-extensions">;

@@ -17,6 +17,7 @@
 #include "llvm/CASObjectFormats/Utils.h"
 #include "llvm/ExecutionEngine/JITLink/ELF_x86_64.h"
 #include "llvm/ExecutionEngine/JITLink/JITLink.h"
+#include "llvm/ExecutionEngine/JITLink/MachO.h"
 #include "llvm/ExecutionEngine/JITLink/MachO_x86_64.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/Error.h"
@@ -54,8 +55,10 @@ cl::opt<bool> SplitEHFrames("split-eh", cl::desc("Split eh-frame sections."),
                             cl::init(true));
 cl::opt<std::string> CASPath("cas", cl::desc("Path to CAS on disk."));
 cl::list<std::string> InputFiles(cl::Positional, cl::desc("Input object"));
-cl::opt<bool> ComputeStats("object-stats",
-                           cl::desc("Compute and print out stats."));
+cl::opt<std::string>
+    ComputeStats("object-stats",
+                 cl::desc("Compute and print out stats. Use '-' to print to "
+                          "stdout, otherwise provide path"));
 cl::opt<std::string> JustDsymutil("just-dsymutil",
                                   cl::desc("Just run dsymutil."));
 cl::opt<std::string> CASGlob("cas-glob",
@@ -90,6 +93,19 @@ cl::opt<InputKind> InputFileKind(
                           "print cas object from cas ID")),
     cl::init(InputKind::IngestFromFS));
 
+enum FormatType {
+  Pretty,
+  CSV,
+};
+
+cl::opt<FormatType> ObjectStatsFormat(
+    "object-stats-format", cl::desc("choose object stats format:"),
+    cl::values(
+        clEnumValN(Pretty, "pretty",
+                   "object stats formatted in a readable format (default)"),
+        clEnumValN(CSV, "csv", "object stats formatted in a CSV format")),
+    cl::init(FormatType::Pretty));
+
 namespace {
 
 class SharedStream {
@@ -108,7 +124,7 @@ private:
 
 } // namespace
 
-static Expected<std::unique_ptr<SchemaBase>>
+static Expected<std::unique_ptr<ObjectFormatSchemaBase>>
 createSchema(CASDB &CAS, StringRef SchemaName) {
   if (SchemaName == "nestedv1")
     return std::make_unique<nestedv1::ObjectFileSchema>(CAS);
@@ -118,10 +134,10 @@ createSchema(CASDB &CAS, StringRef SchemaName) {
                            "invalid schema '" + SchemaName + "'");
 }
 
-static CASID ingestFile(SchemaBase &Schema, StringRef InputFile,
+static CASID ingestFile(ObjectFormatSchemaBase &Schema, StringRef InputFile,
                         MemoryBufferRef FileContent, SharedStream &OS);
-static void computeStats(CASDB &CAS, ArrayRef<CASID> IDs);
-static Error printCASObjectOrTree(SchemaPool &Pool, CASID ID);
+static void computeStats(CASDB &CAS, ArrayRef<CASID> IDs, raw_ostream &StatOS);
+static Error printCASObjectOrTree(ObjectFormatSchemaPool &Pool, CASID ID);
 
 int main(int argc, char *argv[]) {
   ExitOnError ExitOnErr;
@@ -134,19 +150,20 @@ int main(int argc, char *argv[]) {
     return 1;
   }
 
-  std::unique_ptr<CASDB> CAS =
-      StringRef(CASPath).empty()
-          ? createInMemoryCAS()
-          : ExitOnErr(createOnDiskCAS(CASPath == "default-on-disk"
-                                          ? getDefaultOnDiskCASPath()
-                                          : CASPath));
+  std::unique_ptr<CASDB> CAS;
+  if (StringRef(CASPath).empty())
+    CAS = createInMemoryCAS();
+  else if (CASPath == "auto")
+    CAS = ExitOnErr(createOnDiskCAS(getDefaultOnDiskCASPath()));
+  else
+    CAS = ExitOnErr(createOnDiskCAS(CASPath));
 
   ThreadPoolStrategy PoolStrategy = hardware_concurrency();
   if (NumThreads != 0)
     PoolStrategy.ThreadsRequested = NumThreads;
   ThreadPool Pool(PoolStrategy);
 
-  SchemaPool SchemaPool(*CAS);
+  ObjectFormatSchemaPool SchemaPool(*CAS);
   StringMap<CASID> Files;
   SmallVector<CASID> SummaryIDs;
   SharedStream OS(outs());
@@ -154,7 +171,7 @@ int main(int argc, char *argv[]) {
   StringSaver Saver(Alloc);
   std::mutex Lock;
 
-  std::unique_ptr<SchemaBase> IngestSchema =
+  std::unique_ptr<ObjectFormatSchemaBase> IngestSchema =
       ExitOnErr(createSchema(*CAS, IngestSchemaName));
   for (StringRef IF : InputFiles) {
     ExitOnError ExitOnErr;
@@ -162,13 +179,13 @@ int main(int argc, char *argv[]) {
 
     switch (InputFileKind) {
     case AnalysisCASTree: {
-      auto ID = ExitOnErr(CAS->parseCASID(IF));
+      auto ID = ExitOnErr(CAS->parseID(IF));
       SummaryIDs.emplace_back(ID);
       break;
     }
 
     case PrintCASObject: {
-      auto ID = ExitOnErr(CAS->parseCASID(IF));
+      auto ID = ExitOnErr(CAS->parseID(IF));
       ExitOnErr(printCASObjectOrTree(SchemaPool, ID));
       break;
     }
@@ -187,7 +204,7 @@ int main(int argc, char *argv[]) {
     }
 
     case IngestFromCASTree: {
-      auto ID = ExitOnErr(CAS->parseCASID(IF));
+      auto ID = ExitOnErr(CAS->parseID(IF));
       SmallVector<NamedTreeEntry> Stack;
       Stack.emplace_back(ID, TreeEntry::Tree, "/");
       Optional<GlobPattern> GlobP;
@@ -218,7 +235,7 @@ int main(int argc, char *argv[]) {
           ExitOnErr(createStringError(inconvertibleErrorCode(),
                                       "unexpected CAS kind in the tree"));
 
-        TreeRef Tree = ExitOnErr(CAS->getTree(Node.getID()));
+        TreeProxy Tree = ExitOnErr(CAS->getTree(Node.getID()));
         ExitOnErr(Tree.forEachEntry([&](const NamedTreeEntry &Entry) {
           SmallString<128> PathStorage = Node.getName();
           sys::path::append(PathStorage, sys::path::Style::posix,
@@ -244,7 +261,7 @@ int main(int argc, char *argv[]) {
     SmallVector<char, 50> Contents;
     {
       raw_svector_ostream OS(Contents);
-      writeCASIDBuffer(*CAS, File->second, OS);
+      writeCASIDBuffer(File->second, OS);
     }
     std::unique_ptr<FileOutputBuffer> outBuf =
         ExitOnErr(FileOutputBuffer::create(CASIDOutput, Contents.size()));
@@ -266,12 +283,28 @@ int main(int argc, char *argv[]) {
     CASID SummaryID = ExitOnErr(Builder.create(*CAS));
     SummaryIDs.emplace_back(SummaryID);
     MSG("summary tree: ");
-    ExitOnErr(CAS->printCASID(outs(), SummaryID));
-    MSG("\n");
+    outs() << SummaryID << "\n";
   }
 
-  if (ComputeStats)
-    computeStats(*CAS, SummaryIDs);
+  if (ComputeStats.empty()) {
+    return 0;
+  }
+
+  bool PrintToStdout = false;
+  if (StringRef(ComputeStats) == "-")
+    PrintToStdout = true;
+
+  raw_ostream *StatOS = &outs();
+  Optional<raw_fd_ostream> StatsFile;
+
+  if (!PrintToStdout) {
+    std::error_code EC;
+    StatsFile.emplace(ComputeStats, EC, sys::fs::OF_None);
+    ExitOnErr(errorCodeToError(EC));
+    StatOS = &*StatsFile;
+  }
+
+  computeStats(*CAS, SummaryIDs, *StatOS);
 
   return 0;
 }
@@ -285,7 +318,7 @@ struct NodeInfo {
 
 struct POTItem {
   CASID ID;
-  const SchemaBase *Schema = nullptr;
+  const ObjectFormatSchemaBase *Schema = nullptr;
 };
 
 struct ObjectKindInfo {
@@ -304,12 +337,13 @@ struct StatCollector {
   CASDB &CAS;
 
   using POTItemHandler = unique_function<void(
-      ExitOnError &, function_ref<void(ObjectKindInfo &)>, cas::NodeRef)>;
+      ExitOnError &, function_ref<void(ObjectKindInfo &)>, cas::NodeProxy)>;
 
   // FIXME: Utilize \p SchemaPool.
   nestedv1::ObjectFileSchema NestedV1Schema;
   flatv1::ObjectFileSchema FlatV1Schema;
-  SmallVector<std::pair<const SchemaBase *, POTItemHandler>> Schemas;
+  SmallVector<std::pair<const ObjectFormatSchemaBase *, POTItemHandler>>
+      Schemas;
 
   StatCollector(CASDB &CAS)
       : CAS(CAS), NestedV1Schema(CAS), FlatV1Schema(CAS) {
@@ -317,14 +351,14 @@ struct StatCollector {
         &NestedV1Schema,
         [&](ExitOnError &ExitOnErr,
             function_ref<void(ObjectKindInfo & Info)> addNodeStats,
-            cas::NodeRef Node) {
+            cas::NodeProxy Node) {
           visitPOTItemNestedV1(ExitOnErr, NestedV1Schema, addNodeStats, Node);
         }));
     Schemas.push_back(std::make_pair(
         &FlatV1Schema,
         [&](ExitOnError &ExitOnErr,
             function_ref<void(ObjectKindInfo & Info)> addNodeStats,
-            cas::NodeRef Node) {
+            cas::NodeProxy Node) {
           visitPOTItemFlatV1(ExitOnErr, FlatV1Schema, addNodeStats, Node);
         }));
   }
@@ -348,13 +382,16 @@ struct StatCollector {
   void visitPOT(ExitOnError &ExitOnErr, ArrayRef<CASID> TopLevels,
                 ArrayRef<POTItem> POT);
   void visitPOTItem(ExitOnError &ExitOnErr, const POTItem &Item);
-  void visitPOTItemNestedV1(
-      ExitOnError &ExitOnErr, nestedv1::ObjectFileSchema &Schema,
-      function_ref<void(ObjectKindInfo &Info)> addNodeStats, cas::NodeRef Node);
-  void visitPOTItemFlatV1(
-      ExitOnError &ExitOnErr, flatv1::ObjectFileSchema &Schema,
-      function_ref<void(ObjectKindInfo &Info)> addNodeStats, cas::NodeRef Node);
-  void printToOuts(ArrayRef<CASID> TopLevels);
+  void
+  visitPOTItemNestedV1(ExitOnError &ExitOnErr,
+                       nestedv1::ObjectFileSchema &Schema,
+                       function_ref<void(ObjectKindInfo &Info)> addNodeStats,
+                       cas::NodeProxy Node);
+  void visitPOTItemFlatV1(ExitOnError &ExitOnErr,
+                          flatv1::ObjectFileSchema &Schema,
+                          function_ref<void(ObjectKindInfo &Info)> addNodeStats,
+                          cas::NodeProxy Node);
+  void printToOuts(ArrayRef<CASID> TopLevels, raw_ostream &StatOS);
 };
 } // end namespace
 
@@ -372,8 +409,8 @@ void StatCollector::visitPOT(ExitOnError &ExitOnErr, ArrayRef<CASID> TopLevels,
 void StatCollector::visitPOTItem(ExitOnError &ExitOnErr, const POTItem &Item) {
   cas::CASID ID = Item.ID;
   size_t NumPaths = Nodes.lookup(ID).NumPaths;
-  Optional<ObjectKind> Kind = CAS.getObjectKind(ID);
-  assert(Kind);
+  Optional<AnyObjectHandle> Object = ExitOnErr(CAS.loadObject(ID));
+  assert(Object);
 
   auto updateChild = [&](CASID Child) {
     ++Nodes[Child].NumParents;
@@ -381,23 +418,20 @@ void StatCollector::visitPOTItem(ExitOnError &ExitOnErr, const POTItem &Item) {
   };
 
   size_t NumParents = Nodes.lookup(ID).NumParents;
-  if (*Kind == ObjectKind::Blob && Item.Schema)
-    Kind = ObjectKind::Node; // Hack because nodes with no references look
-                             // like blobs.
-  if (*Kind == ObjectKind::Blob) {
+  if (auto Blob = Object->dyn_cast<BlobHandle>()) {
     auto &Info = Stats["builtin:blob"];
     ++Info.Count;
-    Info.DataSize += ExitOnErr(CAS.getBlob(ID)).getData().size();
+    Info.DataSize += CAS.getDataSize(Blob->getData());
     Info.NumPaths += NumPaths;
     Info.NumParents += NumParents;
     Totals.NumPaths += NumPaths; // Count paths to leafs.
     return;
   }
 
-  if (*Kind == ObjectKind::Tree) {
+  if (auto TreeH = Object->dyn_cast<TreeHandle>()) {
     auto &Info = Stats["builtin:tree"];
     ++Info.Count;
-    TreeRef Tree = ExitOnErr(CAS.getTree(ID));
+    TreeProxy Tree = TreeProxy::load(CAS, *TreeH);
     Info.NumChildren += Tree.size();
     Info.NumParents += NumParents;
     Info.NumPaths += NumPaths;
@@ -414,8 +448,7 @@ void StatCollector::visitPOTItem(ExitOnError &ExitOnErr, const POTItem &Item) {
     return;
   }
 
-  assert(*Kind == ObjectKind::Node);
-  cas::NodeRef Node = ExitOnErr(CAS.getNode(ID));
+  NodeProxy Node = NodeProxy::load(CAS, Object->get<NodeHandle>());
   auto addNodeStats = [&](ObjectKindInfo &Info) {
     ++Info.Count;
     Info.NumChildren += Node.getNumReferences();
@@ -425,7 +458,7 @@ void StatCollector::visitPOTItem(ExitOnError &ExitOnErr, const POTItem &Item) {
     if (!Node.getNumReferences())
       Totals.NumPaths += NumPaths; // Count paths to leafs.
 
-    ExitOnErr(Node.forEachReference([&](CASID ChildID) {
+    ExitOnErr(Node.forEachReferenceID([&](CASID ChildID) {
       updateChild(ChildID);
       return Error::success();
     }));
@@ -448,9 +481,10 @@ void StatCollector::visitPOTItem(ExitOnError &ExitOnErr, const POTItem &Item) {
 
 void StatCollector::visitPOTItemNestedV1(
     ExitOnError &ExitOnErr, nestedv1::ObjectFileSchema &Schema,
-    function_ref<void(ObjectKindInfo &Info)> addNodeStats, cas::NodeRef Node) {
+    function_ref<void(ObjectKindInfo &Info)> addNodeStats,
+    cas::NodeProxy Node) {
   using namespace llvm::casobjectformats::nestedv1;
-  ObjectFormatNodeRef Object = ExitOnErr(Schema.getNode(Node));
+  ObjectFormatNodeProxy Object = ExitOnErr(Schema.getNode(Node));
   addNodeStats(Stats[Object.getKindString()]);
 
   // Check specific stats.
@@ -516,13 +550,15 @@ void StatCollector::visitPOTItemNestedV1(
 
 void StatCollector::visitPOTItemFlatV1(
     ExitOnError &ExitOnErr, flatv1::ObjectFileSchema &Schema,
-    function_ref<void(ObjectKindInfo &Info)> addNodeStats, cas::NodeRef Node) {
+    function_ref<void(ObjectKindInfo &Info)> addNodeStats,
+    cas::NodeProxy Node) {
   using namespace llvm::casobjectformats::flatv1;
-  ObjectFormatNodeRef Object = ExitOnErr(Schema.getNode(Node));
+  ObjectFormatNodeProxy Object = ExitOnErr(Schema.getNode(Node));
   addNodeStats(Stats[Object.getKindString()]);
 }
 
-static void computeStats(CASDB &CAS, ArrayRef<CASID> TopLevels) {
+static void computeStats(CASDB &CAS, ArrayRef<CASID> TopLevels,
+                         raw_ostream &StatOS) {
   ExitOnError ExitOnErr;
   ExitOnErr.setBanner("llvm-cas-object-format: compute-stats: ");
 
@@ -535,7 +571,7 @@ static void computeStats(CASDB &CAS, ArrayRef<CASID> TopLevels) {
     CASID ID;
     bool Visited;
     StringRef Path;
-    const SchemaBase *Schema = nullptr;
+    const ObjectFormatSchemaBase *Schema = nullptr;
   };
   SmallVector<WorklistItem> Worklist;
   SmallVector<POTItem> POT;
@@ -546,7 +582,7 @@ static void computeStats(CASDB &CAS, ArrayRef<CASID> TopLevels) {
     GlobP.emplace(ExitOnErr(GlobPattern::create(CASGlob)));
 
   auto push = [&](CASID ID, StringRef Path,
-                  const SchemaBase *Schema = nullptr) {
+                  const ObjectFormatSchemaBase *Schema = nullptr) {
     auto &Node = Nodes[ID];
     if (!Node.Done)
       Worklist.push_back({ID, false, Path, Schema});
@@ -570,19 +606,18 @@ static void computeStats(CASDB &CAS, ArrayRef<CASID> TopLevels) {
     Worklist.back().Visited = true;
 
     // FIXME: Maybe this should just assert?
-    Optional<ObjectKind> Kind = CAS.getObjectKind(ID);
-    assert(Kind);
-    if (!Kind) {
+    Optional<AnyObjectHandle> Object = ExitOnErr(CAS.loadObject(ID));
+    assert(Object);
+    if (!Object) {
       Worklist.pop_back();
       continue;
     }
 
-    if (*Kind == ObjectKind::Blob)
+    if (Object->is<BlobHandle>())
       continue;
 
-    if (*Kind == ObjectKind::Tree) {
-      TreeRef Tree = ExitOnErr(CAS.getTree(ID));
-      ExitOnErr(Tree.forEachEntry([&](const NamedTreeEntry &Entry) {
+    if (auto Tree = Object->dyn_cast<TreeHandle>()) {
+      ExitOnErr(CAS.forEachTreeEntry(*Tree, [&](const NamedTreeEntry &Entry) {
         SmallString<128> PathStorage = Name;
         sys::path::append(PathStorage, sys::path::Style::posix,
                           Entry.getName());
@@ -596,9 +631,8 @@ static void computeStats(CASDB &CAS, ArrayRef<CASID> TopLevels) {
       continue;
     }
 
-    assert(*Kind == ObjectKind::Node);
-    NodeRef Node = ExitOnErr(CAS.getNode(ID));
-    const SchemaBase *&Schema = Worklist.back().Schema;
+    NodeProxy Node = NodeProxy::load(CAS, Object->get<NodeHandle>());
+    const ObjectFormatSchemaBase *&Schema = Worklist.back().Schema;
 
     // Update the schema.
     if (!Schema) {
@@ -609,17 +643,19 @@ static void computeStats(CASDB &CAS, ArrayRef<CASID> TopLevels) {
       Schema = nullptr;
     }
 
-    ExitOnErr(Node.forEachReference([&, Schema](CASID ChildID) {
+    ExitOnErr(Node.forEachReferenceID([&, Schema](CASID ChildID) {
       push(ChildID, "", Schema);
       return Error::success();
     }));
   }
 
   Collector.visitPOT(ExitOnErr, TopLevels, POT);
-  Collector.printToOuts(TopLevels);
+  Collector.printToOuts(TopLevels, StatOS);
 }
 
-void StatCollector::printToOuts(ArrayRef<CASID> TopLevels) {
+void StatCollector::printToOuts(ArrayRef<CASID> TopLevels,
+                                raw_ostream &StatOS) {
+
   SmallVector<StringRef> Kinds;
   auto addToTotal = [&Totals = this->Totals](ObjectKindInfo Info) {
     Totals.Count += Info.Count;
@@ -634,27 +670,41 @@ void StatCollector::printToOuts(ArrayRef<CASID> TopLevels) {
   llvm::sort(Kinds);
 
   size_t NumHashBytes = TopLevels.front().getHash().size();
-  outs() << "  => Note: 'Parents' counts incoming edges\n"
-         << "  => Note: 'Children' counts outgoing edges (to sub-objects)\n"
-         << "  => Note: HashSize = " << NumHashBytes << "B\n"
-         << "  => Note: PtrSize  = " << sizeof(void *) << "B\n"
-         << "  => Note: Cost     = Count*HashSize + PtrSize*Children + Data\n";
-  StringLiteral HeaderFormat = "{0,-22} {1,+10} {2,+7} {3,+10} {4,+7} {5,+10} "
-                               "{6,+7} {7,+10} {8,+7} {9,+10} {10,+7}\n";
-  StringLiteral Format = "{0,-22} {1,+10} {2,+7:P} {3,+10} {4,+7:P} {5,+10} "
-                         "{6,+7:P} {7,+10} {8,+7:P} {9,+10} {10,+7:P}\n";
-  outs() << llvm::formatv(HeaderFormat.begin(), "Kind", "Count", "", "Parents",
+  if (ObjectStatsFormat == FormatType::Pretty) {
+    StatOS
+        << "  => Note: 'Parents' counts incoming edges\n"
+        << "  => Note: 'Children' counts outgoing edges (to sub-objects)\n"
+        << "  => Note: HashSize = " << NumHashBytes << "B\n"
+        << "  => Note: PtrSize  = " << sizeof(void *) << "B\n"
+        << "  => Note: Cost     = Count*HashSize + PtrSize*Children + Data\n";
+  }
+  StringLiteral HeaderFormatPretty =
+      "{0,-22} {1,+10} {2,+7} {3,+10} {4,+7} {5,+10} "
+      "{6,+7} {7,+10} {8,+7} {9,+10} {10,+7}\n";
+  StringLiteral FormatPretty =
+      "{0,-22} {1,+10} {2,+7:P} {3,+10} {4,+7:P} {5,+10} "
+      "{6,+7:P} {7,+10} {8,+7:P} {9,+10} {10,+7:P}\n";
+  StringLiteral FormatCSV = "{0}, {1}, {3}, {5}, {7}, {9}\n";
+
+  StringLiteral HeaderFormat =
+      ObjectStatsFormat == FormatType::Pretty ? HeaderFormatPretty : FormatCSV;
+  StringLiteral Format =
+      ObjectStatsFormat == FormatType::Pretty ? FormatPretty : FormatCSV;
+
+  StatOS << llvm::formatv(HeaderFormat.begin(), "Kind", "Count", "", "Parents",
                           "", "Children", "", "Data (B)", "", "Cost (B)", "");
-  outs() << llvm::formatv(HeaderFormat.begin(), "====", "=====", "",
-                          "=======", "", "========", "", "========", "",
-                          "========", "");
-  auto printInfo = [Format, NumHashBytes, &Totals = this->Totals](
-                       StringRef Kind, ObjectKindInfo Info) {
+  if (ObjectStatsFormat == FormatType::Pretty) {
+    StatOS << llvm::formatv(HeaderFormat.begin(), "====", "=====", "",
+                            "=======", "", "========", "", "========", "",
+                            "========", "");
+  }
+
+  auto printInfo = [&](StringRef Kind, ObjectKindInfo Info) {
     if (!Info.Count)
       return;
     auto getPercent = [](double N, double D) { return D ? N / D : 0.0; };
     size_t Size = Info.getTotalSize(NumHashBytes);
-    outs() << llvm::formatv(
+    StatOS << llvm::formatv(
         Format.begin(), Kind, Info.Count, getPercent(Info.Count, Totals.Count),
         Info.NumParents, getPercent(Info.NumParents, Totals.NumParents),
         Info.NumChildren, getPercent(Info.NumChildren, Totals.NumChildren),
@@ -665,14 +715,20 @@ void StatCollector::printToOuts(ArrayRef<CASID> TopLevels) {
     printInfo(Kind, Stats.lookup(Kind));
   printInfo("TOTAL", Totals);
 
+  StringLiteral OtherStatsPretty = "{0,-22} {1,+10}\n";
+  StringLiteral OtherStatsCSV = "{0}, {1}\n";
+
+  StringLiteral OtherStats = ObjectStatsFormat == FormatType::Pretty
+                                 ? OtherStatsPretty
+                                 : OtherStatsCSV;
   // Other stats.
   bool HasPrinted = false;
-  auto printIfNotZero = [&HasPrinted](StringRef Name, size_t Num) {
+  auto printIfNotZero = [&](StringRef Name, size_t Num) {
     if (!Num)
       return;
     if (!HasPrinted)
-      outs() << "\n";
-    outs() << llvm::formatv("{0,-22} {1,+10}\n", Name, Num);
+      StatOS << "\n";
+    StatOS << llvm::formatv(OtherStats.begin(), Name, Num);
     HasPrinted = true;
   };
 
@@ -689,15 +745,15 @@ void StatCollector::printToOuts(ArrayRef<CASID> TopLevels) {
   printIfNotZero("num-2-target-blocks", Num1TargetBlocks);
 }
 
-static Error printCASObject(SchemaPool &Pool, CASID ID) {
+static Error printCASObject(ObjectFormatSchemaPool &Pool, CASID ID) {
   auto Reader = Pool.createObjectReader(ID);
   if (Error E = Reader.takeError())
     return E;
   return printCASObject(**Reader, outs());
 }
 
-static Error printCASObjectOrTree(SchemaPool &Pool, CASID ID) {
-  Expected<TreeRef> ExpTree = Pool.getCAS().getTree(ID);
+static Error printCASObjectOrTree(ObjectFormatSchemaPool &Pool, CASID ID) {
+  Expected<TreeProxy> ExpTree = Pool.getCAS().getTree(ID);
   if (Error E = ExpTree.takeError()) {
     // Not a tree.
     return printCASObject(Pool, ID);
@@ -705,7 +761,7 @@ static Error printCASObjectOrTree(SchemaPool &Pool, CASID ID) {
 
   return walkFileTreeRecursively(
       Pool.getCAS(), ID,
-      [&](const NamedTreeEntry &entry, Optional<TreeRef>) -> Error {
+      [&](const NamedTreeEntry &entry, Optional<TreeProxy>) -> Error {
         if (entry.getKind() == TreeEntry::Tree)
           return Error::success();
         if (entry.getKind() != TreeEntry::Regular) {
@@ -732,14 +788,15 @@ static void dumpGraph(jitlink::LinkGraph &G, SharedStream &OS, StringRef Desc) {
 /// removeRedundantEHFrameSymbol() removes this redundant symbol before we run
 /// the EH frame splitter.
 /// FIXME: Should this be taken care of by the EH frame splitter?
-static void removeRedundantEHFrameSymbol(jitlink::LinkGraph &G) {
+static void removeRedundantSectionSymbol(jitlink::LinkGraph &G,
+                                         StringRef SectionName) {
   // FIXME: Consider implementing removeRedundantEHFrameSymbol as a jitlink
   // pass. Note this section name is machO specific.
-  auto *EHFrame = G.findSectionByName("__TEXT,__eh_frame");
-  if (!EHFrame)
+  auto *Section = G.findSectionByName(SectionName);
+  if (!Section)
     return;
   for (jitlink::Symbol *Sym : G.defined_symbols()) {
-    if (&Sym->getBlock().getSection() == EHFrame) {
+    if (&Sym->getBlock().getSection() == Section) {
       G.removeDefinedSymbol(*Sym);
       break;
     }
@@ -749,7 +806,7 @@ static void removeRedundantEHFrameSymbol(jitlink::LinkGraph &G) {
 static Error createSplitEHFramePasses(jitlink::LinkGraph &G) {
   if (G.getTargetTriple().getObjectFormat() == Triple::MachO &&
       G.getTargetTriple().getArch() == Triple::x86_64) {
-    removeRedundantEHFrameSymbol(G);
+    removeRedundantSectionSymbol(G, "__TEXT,__eh_frame");
     if (auto E = jitlink::createEHFrameSplitterPass_MachO_x86_64()(G))
       return E;
     if (auto E = jitlink::createEHFrameEdgeFixerPass_MachO_x86_64()(G))
@@ -767,7 +824,23 @@ static Error createSplitEHFramePasses(jitlink::LinkGraph &G) {
   return Error::success();
 }
 
-static CASID ingestFile(SchemaBase &Schema, StringRef InputFile,
+static Error SplitDebugLine(jitlink::LinkGraph &G) {
+  if (G.getTargetTriple().getObjectFormat() == Triple::MachO) {
+    removeRedundantSectionSymbol(G, "__DWARF,__debug_line");
+    if (auto E = jitlink::createDebugLineSplitterPass_MachO()(G))
+      return E;
+    // Add an anonymous symbol so that the blocks don't get dropped
+    if (auto *DLSec = G.findSectionByName("__DWARF,__debug_line")) {
+      for (auto *B : DLSec->blocks()) {
+        G.addAnonymousSymbol(*B, 0, B->getSize(), false, true);
+      }
+    }
+    
+  }
+  return Error::success();
+}
+
+static CASID ingestFile(ObjectFormatSchemaBase &Schema, StringRef InputFile,
                         MemoryBufferRef FileContent, SharedStream &OS) {
   ExitOnError ExitOnErr;
   ExitOnErr.setBanner(("llvm-cas-object-format: " + InputFile + ": ").str());
@@ -788,6 +861,9 @@ static CASID ingestFile(SchemaBase &Schema, StringRef InputFile,
 
     if (SplitEHFrames)
       ExitOnErr(createSplitEHFramePasses(*G));
+    
+    ExitOnErr(SplitDebugLine(*G));
+            
     return G;
   };
 
@@ -877,10 +953,9 @@ static CASID ingestFile(SchemaBase &Schema, StringRef InputFile,
     auto newG = createLinkGraph(FileContent);
     auto NewCompileUnit = ExitOnErr(Schema.createFromLinkGraph(*newG));
     if (NewCompileUnit.getID() != CompileUnit.getID()) {
-      errs() << "error: got different CASID while repeating ingestion, ";
-      ExitOnErr(CAS.printCASID(errs(), CompileUnit));
-      errs() << " and ";
-      ExitOnErr(CAS.printCASID(errs(), NewCompileUnit));
+      errs() << "error: got different CASID while repeating ingestion, "
+             << CompileUnit.getID() << " and " << NewCompileUnit.getID()
+             << "\n";
       exit(1);
     }
   }

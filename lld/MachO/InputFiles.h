@@ -35,7 +35,7 @@ class InterfaceFile;
 } // namespace MachO
 class TarWriter;
 namespace casobjectformats {
-class SchemaPool;
+class ObjectFormatSchemaPool;
 } // namespace casobjectformats
 } // namespace llvm
 
@@ -90,6 +90,9 @@ struct CallGraphEntry {
   uint32_t toIndex;
   // Number of calls from callee to caller in the profile.
   uint64_t count;
+
+  CallGraphEntry(uint32_t fromIndex, uint32_t toIndex, uint64_t count)
+      : fromIndex(fromIndex), toIndex(toIndex), count(count) {}
 };
 
 class InputFile {
@@ -161,8 +164,6 @@ public:
   static void parseLCLinkerOptions(MemoryBufferRef mb);
 
 private:
-  Section *compactUnwindSection = nullptr;
-
   void init(StringRef archiveName);
   template <class LP> void parseLazy();
   template <class SectionHeader> void parseSections(ArrayRef<SectionHeader>);
@@ -174,9 +175,9 @@ private:
   Symbol *parseNonSectionSymbol(const NList &sym, StringRef name);
   template <class SectionHeader>
   void parseRelocations(ArrayRef<SectionHeader> sectionHeaders,
-                        const SectionHeader &, Subsections &);
+                        const SectionHeader &, Section &);
   void parseDebugInfo();
-  void registerCompactUnwind();
+  void registerCompactUnwind(Section &compactUnwindSection);
 };
 
 // CAS-schema .o file
@@ -186,7 +187,7 @@ public:
   ~CASSchemaFile();
   static bool classof(const InputFile *f) { return f->kind() == CASSchemaKind; }
 
-  Error parse(llvm::casobjectformats::SchemaPool &CASSchemas,
+  Error parse(llvm::casobjectformats::ObjectFormatSchemaPool &CASSchemas,
               llvm::cas::CASID ID);
 };
 
@@ -208,10 +209,10 @@ public:
   // to the root. On the other hand, if a dylib is being directly loaded
   // (through an -lfoo flag), then `umbrella` should be a nullptr.
   explicit DylibFile(MemoryBufferRef mb, DylibFile *umbrella,
-                     bool isBundleLoader = false);
+                     bool isBundleLoader, bool explicitlyLinked);
   explicit DylibFile(const llvm::MachO::InterfaceFile &interface,
-                     DylibFile *umbrella = nullptr,
-                     bool isBundleLoader = false);
+                     DylibFile *umbrella, bool isBundleLoader,
+                     bool explicitlyLinked);
 
   void parseLoadCommands(MemoryBufferRef mb);
   void parseReexports(const llvm::MachO::InterfaceFile &interface);
@@ -329,6 +330,7 @@ std::vector<const CommandType *> findCommands(const void *anyHdr,
 } // namespace macho
 
 std::string toString(const macho::InputFile *file);
+std::string toString(const macho::Section &);
 } // namespace lld
 
 #endif

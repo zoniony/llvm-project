@@ -267,6 +267,7 @@ public:
   bool SupportsProfiling() const override;
 
   bool UseDwarfDebugFlags() const override;
+  std::string GetGlobalDebugPathRemapping() const override;
 
   llvm::ExceptionHandling
   GetExceptionModel(const llvm::opt::ArgList &Args) const override {
@@ -316,6 +317,9 @@ public:
 
   /// The information about the darwin SDK that was used.
   mutable Optional<DarwinSDKInfo> SDKInfo;
+
+  /// The target variant triple that was specified (if any).
+  mutable Optional<llvm::Triple> TargetVariantTriple;
 
   CudaInstallationDetector CudaInstallation;
   RocmInstallationDetector RocmInstallation;
@@ -483,6 +487,12 @@ public:
     return (!MinVers.empty() && MinVers > TargetVersion
                 ? MinVers
                 : TargetVersion) < VersionTuple(V0, V1, V2);
+  }
+
+  /// Returns the darwin target variant triple, the variant of the deployment
+  /// target for which the code is being compiled.
+  Optional<llvm::Triple> getTargetVariantTriple() const override {
+    return TargetVariantTriple;
   }
 
 protected:

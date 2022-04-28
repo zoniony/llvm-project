@@ -11,7 +11,6 @@
 #include "flang/Frontend/FrontendActions.h"
 #include "flang/Frontend/FrontendOptions.h"
 #include "flang/Frontend/FrontendPluginRegistry.h"
-#include "flang/FrontendTool/Utils.h"
 #include "clang/Basic/DiagnosticFrontend.h"
 #include "llvm/Support/Errc.h"
 #include "llvm/Support/VirtualFileSystem.h"
@@ -176,6 +175,21 @@ bool FrontendAction::RunSemanticChecks() {
 
   // Report the diagnostics from the semantic checks
   semantics.EmitMessages(ci.semaOutputStream());
+
+  return true;
+}
+
+bool FrontendAction::GenerateRtTypeTables() {
+  instance().setRtTyTables(
+      std::make_unique<Fortran::semantics::RuntimeDerivedTypeTables>(
+          BuildRuntimeDerivedTypeTables(
+              instance().invocation().semanticsContext())));
+
+  // The runtime derived type information table builder may find additional
+  // semantic errors. Report them.
+  if (reportFatalSemanticErrors()) {
+    return false;
+  }
 
   return true;
 }

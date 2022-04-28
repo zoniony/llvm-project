@@ -128,7 +128,8 @@ public:
   ///
   /// When the lexer is done, one of the things that need to be preserved is the
   /// conditional #if stack, so the ASTWriter/ASTReader can save/restore it when
-  /// processing the rest of the file.
+  /// processing the rest of the file. Similarly, we track an unterminated
+  /// #pragma assume_nonnull.
   bool GeneratePreamble = false;
 
   /// Whether to write comment locations into the PCH when building it.
@@ -212,6 +213,10 @@ public:
 
   /// Prevents intended crashes when using #pragma clang __debug. For testing.
   bool DisablePragmaDebugCrash = false;
+
+  /// Cache raw tokenization. Currently ignored unless the filesystem has is
+  /// CAS-friendly.
+  bool CacheRawLex = false;
 
 public:
   PreprocessorOptions() : PrecompiledPreambleBytes(0, false) {}

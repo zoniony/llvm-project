@@ -23,9 +23,12 @@ const char *Action::getClassName(ActionClass AC) {
   case BindArchClass: return "bind-arch";
   case OffloadClass:
     return "offload";
+  case DepscanJobClass: return "depscan";
   case PreprocessJobClass: return "preprocessor";
   case PrecompileJobClass: return "precompiler";
   case HeaderModulePrecompileJobClass: return "header-module-precompiler";
+  case ExtractAPIJobClass:
+    return "api-extractor";
   case AnalyzeJobClass: return "analyzer";
   case MigrateJobClass: return "migrator";
   case CompileJobClass: return "compiler";
@@ -316,6 +319,11 @@ JobAction::JobAction(ActionClass Kind, Action *Input, types::ID Type)
 JobAction::JobAction(ActionClass Kind, const ActionList &Inputs, types::ID Type)
     : Action(Kind, Inputs, Type) {}
 
+void DepscanJobAction::anchor() {}
+
+DepscanJobAction::DepscanJobAction(Action *Input, types::ID OutputType)
+    : JobAction(DepscanJobClass, Input, OutputType), JA(this) {}
+
 void PreprocessJobAction::anchor() {}
 
 PreprocessJobAction::PreprocessJobAction(Action *Input, types::ID OutputType)
@@ -338,6 +346,11 @@ HeaderModulePrecompileJobAction::HeaderModulePrecompileJobAction(
     Action *Input, types::ID OutputType, const char *ModuleName)
     : PrecompileJobAction(HeaderModulePrecompileJobClass, Input, OutputType),
       ModuleName(ModuleName) {}
+
+void ExtractAPIJobAction::anchor() {}
+
+ExtractAPIJobAction::ExtractAPIJobAction(Action *Inputs, types::ID OutputType)
+    : JobAction(ExtractAPIJobClass, Inputs, OutputType) {}
 
 void AnalyzeJobAction::anchor() {}
 
