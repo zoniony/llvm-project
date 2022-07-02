@@ -283,6 +283,11 @@ createWholeProgramDevirtPass(ModuleSummaryIndex *ExportSummary,
 /// devirtualization and control-flow integrity.
 ModulePass *createGlobalSplitPass();
 
+/// createFunctionMergingPass - This pass merges similar functions to reduce
+/// code size.
+///
+ModulePass *createFunctionMergingPass();
+
 //===----------------------------------------------------------------------===//
 // SampleProfilePass - Loads sample profile data from disk and generates
 // IR metadata to reflect the profile.

@@ -70,6 +70,7 @@ MODULE_PASS("inliner-wrapper-no-mandatory-first", ModuleInlinerWrapperPass(
 MODULE_PASS("insert-gcov-profiling", GCOVProfilerPass())
 MODULE_PASS("instrorderfile", InstrOrderFilePass())
 MODULE_PASS("instrprof", InstrProfiling())
+MODULE_PASS("func-merging", FunctionMergingPass())
 MODULE_PASS("internalize", InternalizePass())
 MODULE_PASS("invalidate<all>", InvalidateAllAnalysesPass())
 MODULE_PASS("ipsccp", IPSCCPPass())
