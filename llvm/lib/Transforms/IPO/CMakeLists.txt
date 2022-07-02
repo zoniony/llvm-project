@@ -12,6 +12,7 @@ add_llvm_component_library(LLVMipo
   DeadArgumentElimination.cpp
   ElimAvailExtern.cpp
   ExtractGV.cpp
+  FunctionMerging.cpp
   ForceFunctionAttrs.cpp
   FunctionAttrs.cpp
   FunctionImport.cpp
