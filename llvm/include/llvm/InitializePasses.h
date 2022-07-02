@@ -175,6 +175,7 @@ void initializeFunctionImportLegacyPassPass(PassRegistry&);
 void initializeFunctionSpecializationLegacyPassPass(PassRegistry &);
 void initializeGCMachineCodeAnalysisPass(PassRegistry&);
 void initializeGCModuleInfoPass(PassRegistry&);
+void initializeFunctionMergingLegacyPassPass(PassRegistry &);
 void initializeGCOVProfilerLegacyPassPass(PassRegistry&);
 void initializeGVNHoistLegacyPassPass(PassRegistry&);
 void initializeGVNLegacyPassPass(PassRegistry&);

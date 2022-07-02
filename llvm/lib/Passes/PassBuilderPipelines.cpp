@@ -17,6 +17,7 @@
 #include "llvm/Analysis/AliasAnalysis.h"
 #include "llvm/Analysis/BasicAliasAnalysis.h"
 #include "llvm/Analysis/CGSCCPassManager.h"
+#include "llvm/Transforms/IPO/FunctionMerging.h"
 #include "llvm/Analysis/GlobalsModRef.h"
 #include "llvm/Analysis/InlineAdvisor.h"
 #include "llvm/Analysis/OptimizationRemarkEmitter.h"
@@ -1726,6 +1727,8 @@ PassBuilder::buildLTODefaultPipeline(OptimizationLevel Level,
 
   if (PTO.MergeFunctions)
     MPM.addPass(MergeFunctionsPass());
+
+  MPM.addPass(FunctionMergingPass());
 
   for (auto &C : FullLinkTimeOptimizationLastEPCallbacks)
     C(MPM, Level);

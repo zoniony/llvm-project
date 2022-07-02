@@ -31,6 +31,7 @@ void llvm::initializeIPO(PassRegistry &Registry) {
   initializeCrossDSOCFIPass(Registry);
   initializeDAEPass(Registry);
   initializeDAHPass(Registry);
+  initializeFunctionMergingLegacyPassPass(Registry);
   initializeForceFunctionAttrsLegacyPassPass(Registry);
   initializeFunctionSpecializationLegacyPassPass(Registry);
   initializeGlobalDCELegacyPassPass(Registry);

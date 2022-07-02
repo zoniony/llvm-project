@@ -235,6 +235,11 @@ ModulePass *createPartialInliningPass();
 /// manager.
 ModulePass *createBarrierNoopPass();
 
+/// createFunctionMergingPass - This pass merges similar functions to reduce
+/// code size.
+///
+ModulePass *createFunctionMergingPass();
+
 /// createCalledValuePropagationPass - Attach metadata to indirct call sites
 /// indicating the set of functions they may target at run-time.
 ModulePass *createCalledValuePropagationPass();
