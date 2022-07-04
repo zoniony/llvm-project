@@ -98,6 +98,7 @@
 #include "llvm/Transforms/IPO/ForceFunctionAttrs.h"
 #include "llvm/Transforms/IPO/FunctionAttrs.h"
 #include "llvm/Transforms/IPO/FunctionImport.h"
+#include "llvm/Transforms/IPO/FunctionMerging.h"
 #include "llvm/Transforms/IPO/GlobalDCE.h"
 #include "llvm/Transforms/IPO/GlobalOpt.h"
 #include "llvm/Transforms/IPO/GlobalSplit.h"
@@ -1904,7 +1905,7 @@ PassBuilder::buildLTODefaultPipeline(OptimizationLevel Level,
 
   if (PTO.MergeFunctions)
     MPM.addPass(MergeFunctionsPass());
-
+  MPM.addPass(FunctionMergingPass());
   // Emit annotation remarks.
   addAnnotationRemarksPass(MPM);
 
