@@ -118,14 +118,6 @@
 #include <climits>
 #include <ctime>
 
-#ifdef __unix__
-/* __unix__ is usually defined by compilers targeting Unix systems */
-#include <unistd.h>
-#elif defined(_WIN32) || defined(WIN32)
-/* _Win32 is usually defined by compilers targeting 32 or   64 bit Windows
- * systems */
-#include <windows.h>
-#endif
 
 #define DEBUG_TYPE "func-merging"
 
@@ -171,7 +163,7 @@ static cl::opt<bool>
                             cl::Hidden, cl::desc("Enable operand reordering"));
 
 static cl::opt<bool>
-    HasWholeProgram("func-merging-whole-program", cl::init(false), cl::Hidden,
+    HasWholeProgram("func-merging-whole-program", cl::init(true), cl::Hidden,
                     cl::desc("Function merging applied on whole program"));
 
 static cl::opt<bool>
@@ -247,27 +239,6 @@ static cl::opt<unsigned> BucketSizeCap(
     cl::desc("Define a threshold to be used"));
 
 static std::string GetValueName(const Value *V);
-
-#ifdef __unix__ /* __unix__ is usually defined by compilers targeting Unix     \
-                   systems */
-
-unsigned long long getTotalSystemMemory() {
-  long pages = sysconf(_SC_PHYS_PAGES);
-  long page_size = sysconf(_SC_PAGE_SIZE);
-  return pages * page_size;
-}
-
-#elif defined(_WIN32) ||                                                       \
-    defined(WIN32) /* _Win32 is usually defined by compilers targeting 32 or   \
-                      64 bit Windows systems */
-
-unsigned long long getTotalSystemMemory() {
-  MEMORYSTATUSEX status;
-  status.dwLength = sizeof(status);
-  GlobalMemoryStatusEx(&status);
-  return status.ullTotalPhys;
-}
-#endif
 
 class FunctionMerging {
 public:
@@ -2666,18 +2637,6 @@ FunctionMerger::merge(Function *F1, Function *F2, std::string Name, const Functi
 
     NeedlemanWunschSA<SmallVectorImpl<Value *>> SA(ScoringSystem(-1, 2), FunctionMerger::match);
 
-    auto MemReq = SA.getMemoryRequirement(F1Vec, F2Vec);
-    auto MemAvailable = getTotalSystemMemory();
-    errs() << "Stats: " << F1Vec.size() << " , " << F2Vec.size() << " , " << MemReq << "\n";
-    if (MemReq > MemAvailable * 0.9) {
-      errs() << "Insufficient Memory\n";
-#ifdef TIME_STEPS_DEBUG
-      TimeAlign.stopTimer();
-      time_align_end = std::chrono::steady_clock::now();
-#endif
-      return ErrorResponse;
-    }
-    
     AlignedSeq = SA.getAlignment(F1Vec, F2Vec);
 
   }
@@ -3185,7 +3144,7 @@ static size_t EstimateFunctionSize(Function *F, TargetTransformInfo *TTI) {
     //  break;
     default:
       auto cost = TTI->getInstructionCost(&I, TargetTransformInfo::TargetCostKind::TCK_CodeSize);
-    size += cost;
+      size += cost.getValue().getValue();
     }
   }
   return size_t(std::ceil(size));
